@@ -164,7 +164,7 @@ def record_stream_to_disk(
 
     bytes_written = 0
     start_time = time.monotonic()
-    seen_segments: set[str] = set()
+    seen_segments: dict[str, None] = {}
     consecutive_errors = 0
     current_playlist_url = info.hls_url
     opener = _get_opener(proxy)
@@ -218,14 +218,13 @@ def record_stream_to_disk(
                         break
                     if seg_url in seen_segments:
                         continue
-                    seen_segments.add(seg_url)
+                    seen_segments[seg_url] = None
 
                     # Limit seen_segments memory growth during multi-hour streams
                     if len(seen_segments) > 2000:
-                        # Keep newest ~1000 items
-                        seen_list = list(seen_segments)
-                        seen_segments = set(seen_list[1000:])
-                        seen_segments.add(seg_url)
+                        # Truly discard the oldest 1000 items in FIFO order
+                        for old_key in list(seen_segments.keys())[:1000]:
+                            del seen_segments[old_key]
 
                     try:
                         seg_req = urllib.request.Request(seg_url, headers=_default_headers())

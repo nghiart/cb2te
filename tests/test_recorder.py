@@ -486,6 +486,75 @@ class TestRecorder(unittest.TestCase):
         self.assertTrue(out_mp4.exists())
         self.assertTrue(mock_mux.called)
 
+    @patch("core.recorder.release_os_memory")
+    @patch("core.recorder.mux_stream_copy")
+    @patch("core.recorder.urllib.request.build_opener")
+    def test_record_stream_seen_segments_fifo_pruning_preserves_sliding_window(
+        self, mock_build_opener, mock_mux, mock_release_mem
+    ):
+        """Verify that when seen_segments exceeds 2000 items, pruning strictly discards
+        the oldest items in FIFO order so recent sliding-window segments are not re-downloaded."""
+        poll_count = {"count": 0}
+        downloaded_urls: list[str] = []
+
+        # Poll 1 returns 2005 segments (triggers pruning when count > 2000)
+        # Poll 2 returns sliding window overlapping the last 5 segments + 1 new segment
+        def fake_open(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            resp = MagicMock()
+            if "playlist.m3u8" in url:
+                poll_count["count"] += 1
+                if poll_count["count"] == 1:
+                    lines = ["#EXTM3U", "#EXTINF:2.0,"]
+                    for i in range(2005):
+                        lines.append(f"seg_{i}.ts")
+                    body = "\n".join(lines) + "\n"
+                    resp.read.return_value = body.encode("utf-8")
+                else:
+                    # Sliding window: seg_2000 through seg_2004 are existing, seg_2005 is new
+                    lines = ["#EXTM3U", "#EXTINF:2.0,"]
+                    for i in range(2000, 2006):
+                        lines.append(f"seg_{i}.ts")
+                    lines.append("#EXT-X-ENDLIST")
+                    body = "\n".join(lines) + "\n"
+                    resp.read.return_value = body.encode("utf-8")
+            else:
+                downloaded_urls.append(url)
+                resp.read.side_effect = [b"X", b""]
+            resp.__enter__.return_value = resp
+            return resp
+
+        mock_opener = MagicMock()
+        mock_opener.open.side_effect = fake_open
+        mock_build_opener.return_value = mock_opener
+
+        out_mp4 = self.tmp_dir / "fifo_prune.mp4"
+
+        def fake_mux(input_ts, output_mp4):
+            Path(output_mp4).write_bytes(b"FIFO_MUXED")
+            return True, ""
+
+        mock_mux.side_effect = fake_mux
+
+        info = StreamInfo(room_id="cam_fifo", is_live=True, hls_url="https://live.example.com/playlist.m3u8")
+        stop_event = MagicMock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.return_value = False
+
+        result = record_stream_to_disk(info, out_mp4, stop_event, max_bytes=100_000_000)
+
+        self.assertEqual(result, out_mp4)
+        self.assertTrue(out_mp4.exists())
+        self.assertEqual(poll_count["count"], 2)
+
+        # Total unique segments: 2005 in poll 1 + 1 (seg_2005) in poll 2 = 2006
+        self.assertEqual(len(downloaded_urls), 2006)
+        # Verify no duplicate downloads occurred for the sliding-window segments
+        self.assertEqual(len(downloaded_urls), len(set(downloaded_urls)))
+        self.assertEqual(downloaded_urls.count("https://live.example.com/seg_2000.ts"), 1)
+        self.assertEqual(downloaded_urls.count("https://live.example.com/seg_2004.ts"), 1)
+        self.assertEqual(downloaded_urls[-1], "https://live.example.com/seg_2005.ts")
+
 
 if __name__ == "__main__":
     unittest.main()
