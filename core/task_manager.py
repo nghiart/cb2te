@@ -1,0 +1,291 @@
+"""In-Memory TaskManager & Concurrency Governance Engine.
+
+Governs concurrent Chaturbate stream recording jobs, enforcing concurrency limits,
+staggered probe intervals, and asynchronous recording thread dispatch on Android Termux.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Callable, Optional
+
+from core.android import get_recordings_dir, release_os_memory
+from core.config import normalize_room_id
+from core.recorder import StreamInfo, probe_room, record_stream_to_disk
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "JobStatus",
+    "RecordingJob",
+    "TaskManager",
+]
+
+
+class JobStatus(str, Enum):
+    STANDBY = "STANDBY"
+    RECORDING = "RECORDING"
+    MUXING = "MUXING"
+    UPLOADING = "UPLOADING"
+    ERROR = "ERROR"
+    STOPPED = "STOPPED"
+
+
+@dataclass
+class RecordingJob:
+    room_id: str
+    status: JobStatus = JobStatus.STANDBY
+    bytes_recorded: int = 0
+    current_file: Optional[Path] = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    thread: Optional[threading.Thread] = None
+    started_at: float = 0.0
+    last_poll: float = 0.0
+    error_message: str = ""
+
+
+class TaskManager:
+    """Manages recording jobs, concurrency limits, and staggered polling."""
+
+    def __init__(
+        self,
+        max_concurrent: int = 2,
+        recordings_dir: Optional[Path | str] = None,
+        proxy: str = "",
+        max_bytes: int = 1_800 * 1024 * 1024,
+    ) -> None:
+        self.max_concurrent = max(1, max_concurrent)
+        self.proxy = proxy
+        self.max_bytes = max_bytes
+
+        if recordings_dir is not None:
+            self.recordings_dir = Path(recordings_dir)
+        else:
+            self.recordings_dir = get_recordings_dir()
+
+        try:
+            self.recordings_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+        self._jobs: dict[str, RecordingJob] = {}
+        self._lock = threading.RLock()
+        self._polling_lock = threading.Lock()
+        self._on_file_ready: Optional[Callable[[Path, str, float], None]] = None
+
+    def start_tracking(self, room_id: str) -> bool:
+        """Start tracking a room. Returns True if newly added or reactivated, False otherwise."""
+        clean = normalize_room_id(room_id)
+        if not clean:
+            return False
+
+        with self._lock:
+            if clean in self._jobs:
+                job = self._jobs[clean]
+                if job.status in (JobStatus.STOPPED, JobStatus.ERROR):
+                    job.status = JobStatus.STANDBY
+                    job.stop_event = threading.Event()
+                    job.thread = None
+                    job.error_message = ""
+                    return True
+                return False
+
+            self._jobs[clean] = RecordingJob(room_id=clean, status=JobStatus.STANDBY)
+            return True
+
+    def stop_tracking(
+        self, room_id: str, wait: bool = False, timeout: float = 2.0
+    ) -> bool:
+        """Stop tracking a room, terminating any running recording. Returns True if removed."""
+        clean = normalize_room_id(room_id)
+        if not clean:
+            return False
+
+        with self._lock:
+            job = self._jobs.pop(clean, None)
+            if job is None:
+                return False
+
+            job.stop_event.set()
+            job.status = JobStatus.STOPPED
+
+        if wait and job.thread and job.thread.is_alive():
+            job.thread.join(timeout=timeout)
+
+        return True
+
+    def get_jobs(self) -> list[RecordingJob]:
+        """Return a shallow copy list of all tracked jobs."""
+        with self._lock:
+            return list(self._jobs.values())
+
+    def get_job(self, room_id: str) -> Optional[RecordingJob]:
+        """Return the RecordingJob for a room if tracked, else None."""
+        clean = normalize_room_id(room_id)
+        with self._lock:
+            return self._jobs.get(clean)
+
+    def get_active_jobs(self) -> list[RecordingJob]:
+        """Return a list of jobs currently recording or muxing."""
+        with self._lock:
+            return [
+                j
+                for j in self._jobs.values()
+                if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+            ]
+
+    def set_on_file_ready_callback(
+        self, cb: Callable[[Path, str, float], None]
+    ) -> None:
+        """Set callback invoked as cb(output_mp4_path, room_id, duration_sec) on file completion."""
+        with self._lock:
+            self._on_file_ready = cb
+
+    def poll_staggered_batch(self, stagger_seconds: float = 0.3) -> None:
+        """Probe standby rooms with staggered timing and dispatch recording if live."""
+        if not self._polling_lock.acquire(blocking=False):
+            logger.debug("poll_staggered_batch already in progress, skipping.")
+            return
+
+        try:
+            with self._lock:
+                active_count = sum(
+                    1
+                    for j in self._jobs.values()
+                    if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                )
+                available_slots = self.max_concurrent - active_count
+                if available_slots <= 0:
+                    return
+
+                candidates = sorted(
+                    [j for j in self._jobs.values() if j.status == JobStatus.STANDBY],
+                    key=lambda j: j.last_poll,
+                )
+
+            for i, job in enumerate(candidates):
+                with self._lock:
+                    if (
+                        self._jobs.get(job.room_id) is not job
+                        or job.status != JobStatus.STANDBY
+                    ):
+                        continue
+                    active_count = sum(
+                        1
+                        for j in self._jobs.values()
+                        if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                    )
+                    if active_count >= self.max_concurrent:
+                        break
+
+                job.last_poll = time.time()
+                try:
+                    info = probe_room(job.room_id, proxy=self.proxy)
+                except Exception as e:
+                    logger.warning("Probe failed for room %s: %s", job.room_id, e)
+                    job.error_message = str(e)
+                    info = None
+
+                if info and info.is_live and info.hls_url:
+                    with self._lock:
+                        if (
+                            self._jobs.get(job.room_id) is job
+                            and job.status == JobStatus.STANDBY
+                        ):
+                            active_count = sum(
+                                1
+                                for j in self._jobs.values()
+                                if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                            )
+                            if active_count < self.max_concurrent:
+                                now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
+                                out_path = self.recordings_dir / out_name
+
+                                job.status = JobStatus.RECORDING
+                                job.current_file = out_path
+                                job.started_at = time.time()
+                                job.bytes_recorded = 0
+                                job.error_message = ""
+                                job.stop_event.clear()
+
+                                t = threading.Thread(
+                                    target=self._record_worker,
+                                    args=(job, info, out_path),
+                                    name=f"rec-{job.room_id}",
+                                    daemon=True,
+                                )
+                                job.thread = t
+                                t.start()
+
+                if i < len(candidates) - 1 and stagger_seconds > 0:
+                    time.sleep(stagger_seconds)
+        finally:
+            self._polling_lock.release()
+
+    def _record_worker(
+        self, job: RecordingJob, info: StreamInfo, out_path: Path
+    ) -> None:
+        """Worker thread executing record_stream_to_disk and lifecycle transitions."""
+        started_mono = time.monotonic()
+        result_mp4: Optional[Path] = None
+
+        try:
+            def on_progress(bytes_written: int, _elapsed: float) -> None:
+                job.bytes_recorded = bytes_written
+
+            result_mp4 = record_stream_to_disk(
+                info=info,
+                out_mp4=out_path,
+                stop_event=job.stop_event,
+                max_bytes=self.max_bytes,
+                on_progress=on_progress,
+                proxy=self.proxy,
+            )
+        except Exception as e:
+            logger.exception("Recording failed for room %s: %s", job.room_id, e)
+            job.error_message = str(e)
+        finally:
+            duration_sec = max(0.0, time.monotonic() - started_mono)
+
+            with self._lock:
+                if job.stop_event.is_set():
+                    job.status = JobStatus.STOPPED
+                elif job.error_message:
+                    job.status = JobStatus.ERROR
+                else:
+                    job.status = JobStatus.STANDBY
+                job.current_file = None
+
+            if result_mp4 and result_mp4.exists() and result_mp4.stat().st_size > 0:
+                if self._on_file_ready:
+                    try:
+                        self._on_file_ready(result_mp4, job.room_id, duration_sec)
+                    except Exception as e:
+                        logger.exception(
+                            "Error in on_file_ready callback for %s: %s",
+                            job.room_id,
+                            e,
+                        )
+
+            release_os_memory()
+
+    def stop_all(self, wait: bool = False, timeout: float = 5.0) -> None:
+        """Signal all active/tracked jobs to stop, optionally waiting for worker threads."""
+        with self._lock:
+            jobs = list(self._jobs.values())
+
+        for job in jobs:
+            job.stop_event.set()
+            job.status = JobStatus.STOPPED
+
+        if wait:
+            for job in jobs:
+                if job.thread and job.thread.is_alive():
+                    job.thread.join(timeout=timeout)
