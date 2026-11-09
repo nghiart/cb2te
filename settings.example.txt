@@ -31,3 +31,4 @@ MIN_FREE_MB = 400
 # 8. Proxy HTTP hoặc SOCKS (để trống nếu không sử dụng)
 # Ví dụ: http://127.0.0.1:8080 hoặc socks5://127.0.0.1:1080
 PROXY = 
+

@@ -49,3 +49,4 @@ def init_telegram_bot(
         favorites_path=favorites_path,
     )
     return client
+
