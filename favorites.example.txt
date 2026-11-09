@@ -1,0 +1,12 @@
+# ==========================================================
+# DANH SÁCH STREAMER THEO DÕI
+# Mỗi dòng một username hoặc đường link phòng Chaturbate
+# Dấu '#' ở đầu dòng nghĩa là tạm tắt (không theo dõi)
+# ==========================================================
+
+# Ví dụ điền username trực tiếp:
+# sweet_girl
+# hot_model_99
+
+# Hoặc điền đường link đầy đủ:
+# https://chaturbate.com/sweet_girl/

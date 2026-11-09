@@ -1,0 +1,33 @@
+# ==========================================================
+# CẤU HÌNH CHATURBATE RECORDER CHO TERMUX & TELEGRAM
+# Copy file này thành settings.txt và điền thông tin của bạn
+# ==========================================================
+
+# 1. Telegram API Credentials (lấy từ https://my.telegram.org)
+API_ID = 12345678
+API_HASH = "0123456789abcdef0123456789abcdef"
+
+# 2. Telegram Bot Token (tạo bot qua @BotFather trên Telegram)
+BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+
+# 3. ID của Group hoặc Channel Telegram để tải video lên
+# Lưu ý: Thêm Bot vào Group/Channel và cấp quyền gửi file (send media).
+# ID Group/Channel thường bắt đầu bằng dấu trừ, ví dụ: -1001234567890
+CHAT_ID = -1001234567890
+
+# 4. Telegram User ID của Admin (người có quyền gõ lệnh bot như /rec, /stop...)
+# Có thể điền nhiều ID, phân cách bằng dấu phẩy
+ADMIN_IDS = 123456789
+
+# 5. Thời gian lưu trữ video cục bộ trên máy trước khi tự xóa (tính bằng giờ, mặc định: 48)
+RETENTION_HOURS = 48
+
+# 6. Số phòng tối đa ghi đồng thời (trên điện thoại khuyến nghị để là 2)
+MAX_CONCURRENT = 2
+
+# 7. Dung lượng bộ nhớ trống tối thiểu (MB) để kích hoạt dọn dẹp khẩn cấp (mặc định: 400 MB)
+MIN_FREE_MB = 400
+
+# 8. Proxy HTTP hoặc SOCKS (để trống nếu không sử dụng)
+# Ví dụ: http://127.0.0.1:8080 hoặc socks5://127.0.0.1:1080
+PROXY = 
