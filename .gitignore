@@ -11,6 +11,10 @@ __pycache__/
 .git-credentials
 *.pem
 
+# Telethon session (chứa khoá đăng nhập Telegram - tuyệt đối không commit)
+*.session
+*.session-journal
+
 # File tạm khi ghi hình
 *.spool
 *.part

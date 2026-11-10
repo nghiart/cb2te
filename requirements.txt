@@ -1,0 +1,13 @@
+# Thư viện Python bắt buộc cho CB2TE (Termux / Linux / Windows)
+# Cài:  pip install -r requirements.txt
+#
+# ffmpeg KHÔNG cài bằng pip — trên Termux dùng: pkg install ffmpeg
+
+# Telegram MTProto (bot + upload file lớn tới 2 GB)
+telethon>=1.36,<2
+
+# Proxy SOCKS5 cho phần tải HLS (chat/segment của Chaturbate)
+pysocks>=1.7.1
+
+# Proxy SOCKS5 cho Telethon (chỉ cần khi PROXY được đặt trong settings.txt)
+python-socks[asyncio]>=2.4.4

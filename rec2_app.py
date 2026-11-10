@@ -200,6 +200,7 @@ def run_doctor_cmd(
     fav_path: Path,
     probe_limit: int,
     rooms: list[str],
+    db_path: Optional[Path] = None,
 ) -> int:
     """Run the full diagnostic suite (the answer to 'why is nothing saved?')."""
     from core.doctor import FAIL, format_report, run_doctor
@@ -211,6 +212,7 @@ def run_doctor_cmd(
         fav_path,
         probe_limit=probe_limit,
         extra_rooms=rooms,
+        db_path=db_path,
     )
     print(format_report(checks))
     return 1 if any(c.status == FAIL for c in checks) else 0
@@ -406,6 +408,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             fav_path,
             probe_limit=args.probe,
             rooms=list(args.rooms or []),
+            db_path=db_path,
         )
 
     if args.cmd == "remux":

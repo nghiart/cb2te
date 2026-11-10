@@ -333,6 +333,7 @@ def run_doctor(
     *,
     probe_limit: int = 1,
     extra_rooms: Optional[list[str]] = None,
+    db_path: Optional[Path] = None,
 ) -> list[Check]:
     """Run every diagnostic check and return the list of results."""
     checks: list[Check] = [
@@ -345,7 +346,7 @@ def run_doctor(
     checks.extend(_check_settings(cfg, settings_path))
     checks.append(_check_termux_helpers())
     checks.append(_check_telethon())
-    checks.append(_check_history(Path("history.json")))
+    checks.append(_check_history(Path(db_path) if db_path else Path("history.json")))
 
     rooms: list[str] = []
     for room in (extra_rooms or []):

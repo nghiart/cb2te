@@ -1,249 +1,572 @@
-# Chaturbate Termux Telegram Recorder (CB2TE)
+# CB2TE — Ghi hình Chaturbate tự động → Telegram (Termux, không cần root)
 
-Hệ thống ghi hình luồng phát sóng Chaturbate tự động, tiêu thụ tài nguyên cực thấp, được thiết kế chuyên biệt để chạy liên tục 24/7 trên thiết bị **Android thông qua môi trường Termux** (không yêu cầu root). Tích hợp điều khiển từ xa và tự động tải video lên **Telegram qua giao thức MTProto (hỗ trợ file dung lượng lớn tới 2.000 MB)**.
+> Hệ thống chạy **24/7 trên điện thoại Android** trong Termux: tự phát hiện streamer online,
+> ghi hình, đóng gói MP4, tải lên Telegram (tới 2 GB/file), tự dọn file sau 48 giờ.
+> Điều khiển từ xa bằng bot Telegram. Không cần root, không cần máy tính.
 
----
+<p align="center">
+  <b>Chaturbate</b> → <i>probe 30 s/lần</i> → <b>ghi HLS</b> → <b>mux MP4 (ffmpeg)</b> → <b>upload Telegram</b> → <b>dọn sau 48 h</b>
+</p>
 
-## 🌟 Tính năng nổi bật
-
-- **Tối ưu hóa chuyên sâu cho Android / Termux**:
-  - Tự động kích hoạt `termux-wake-lock` khi khởi chạy để giữ CPU hoạt động khi tắt màn hình, tự giải phóng `termux-wake-unlock` khi tắt app.
-  - Bộ nhớ RAM tiêu thụ cực thấp (< 70 MB), tự giải phóng heap (`malloc_trim` qua `libc.so`), an toàn tuyệt đối trước cơ chế Android Low Memory Killer (LMK).
-  - Tải luồng trực tiếp xuống đĩa theo chunk nhỏ 64 KB, không ngậm hàng trăm MB trong RAM như các tool thông thường.
-- **Muxing & Phân đoạn thông minh**:
-  - Đóng gói MP4 bằng kỹ thuật stream copy (`-c copy -movflags +faststart`) qua FFmpeg, tải CPU < 2%, không làm nóng máy hay hao pin.
-  - Tự động xoay file khi chạm ngưỡng trần an toàn **1.8 GB** để đảm bảo luôn vừa giới hạn upload 2.000 MB của Telegram.
-- **Hàng đợi Upload Telegram MTProto (Telethon)**:
-  - Tải lên nhóm/kênh Telegram bằng Bot Token qua giao thức MTProto.
-  - Hiển thị thanh tiến độ upload thời gian thực (tự động điều tiết tần suất 5s/lần tránh bị Telegram giới hạn FloodWait).
-  - Tự động xóa thông báo tiến độ tạm sau khi tải xong và gửi video hoàn chỉnh kèm caption chi tiết.
-- **Vòng đời lưu trữ 48 giờ & Xả khẩn cấp**:
-  - Video upload thành công được giữ lại trên máy trong 48 giờ (hoặc số giờ tuỳ chỉnh) trước khi tự động dọn dẹp.
-  - Cơ chế **Emergency Disk Eviction**: Nếu bộ nhớ máy xuống dưới ngưỡng an toàn (mặc định 400 MB), hệ thống sẽ tự động dọn dẹp sớm các file đã tải cũ nhất để bảo vệ thiết bị.
-- **Không bao giờ mất dữ liệu đã ghi**:
-   - Hỗ trợ cả hai định dạng Chaturbate phát ra: MPEG-TS và **fMP4/CMAF** (`#EXT-X-MAP` + `.m4s`).
-   - Nếu ffmpeg lỗi/thiếu, file thô `.ts`/`.m4s` **được giữ lại** (không xoá) và vẫn được upload lên Telegram; đóng gói lại sau bằng `python3 rec2_app.py remux`.
-   - Tự probe lại khi token playlist hết hạn; hỗ trợ proxy HTTP và **SOCKS5** (PySocks).
-- **Tự chẩn đoán sự cố ngay trên máy**:
-   - `python3 rec2_app.py doctor` kiểm tra ffmpeg, quyền ghi, dung lượng, proxy, kết nối Chaturbate và tải thử playlist/segment thật để chỉ ra chính xác mắt xích bị lỗi.
-- **Điều khiển từ xa toàn diện qua Telegram Bot**:
-  - Ra lệnh kiểm tra trạng thái, thêm/bớt streamer, bắt đầu hoặc dừng ghi hình trực tiếp từ tin nhắn Telegram.
+> ⚠️ **Lưu ý:** Chaturbate là nền tảng 18+. Chỉ dùng cho mục đích cá nhân, tôn trọng
+> điều khoản của Chaturbate và quyền riêng tư của người khác. Không dùng để phát tán,
+> bán lại hoặc xâm phạm quyền hình ảnh.
 
 ---
 
-## 📱 Cài đặt trên Android Termux
+## 📑 Mục lục
 
-### Bước 1: Chuẩn bị ứng dụng trên điện thoại
-1. Tải và cài đặt **Termux** từ [F-Droid](https://f-droid.org/packages/com.termux/) *(không dùng bản Google Play Store)*.
-2. Tải thêm **Termux:API** từ [F-Droid](https://f-droid.org/packages/com.termux.api/).
-3. Vào Cài đặt Android -> Ứng dụng -> Termux -> **Tắt tối ưu hóa pin (Chọn Unrestricted / Không hạn chế pin)**.
+1. [Hệ thống này làm gì?](#1-hệ-thống-này-làm-gì)
+2. [Điện thoại cần chuẩn bị gì?](#2-điện-thoại-cần-chuẩn-bị-gì)
+3. [Cài đặt (người mới bắt đầu từ đây)](#3-cài-đặt-người-mới-bắt-đầu-từ-đây)
+4. [Lấy thông tin Telegram](#4-lấy-thông-tin-telegram)
+5. [Cấu hình `settings.txt`](#5-cấu-hình-settingstxt)
+6. [Danh sách theo dõi `favorites.txt`](#6-danh-sách-theo-dõi-favoritestxt)
+7. [Chạy 24/7](#7-chạy-247)
+8. [Lệnh bot Telegram](#8-lệnh-bot-telegram)
+9. [Lệnh trong Termux (CLI)](#9-lệnh-trong-termux-cli)
+10. [Kiểm tra sức khoẻ & chẩn đoán](#10-kiểm-tra-sức-khoẻ--chẩn-đoán)
+11. [Cập nhật phiên bản mới](#11-cập-nhật-phiên-bản-mới)
+12. [Khắc phục sự cố](#12-khắc-phục-sự-cố)
+13. [Câu hỏi thường gặp](#13-câu-hỏi-thường-gặp)
+14. [Cấu trúc dự án & kiểm thử](#14-cấu-trúc-dự-án--kiểm-thử)
 
-### Bước 2: Cài đặt môi trường trong Termux
-Mở Termux và chạy lần lượt các lệnh sau:
+---
+
+## 1. Hệ thống này làm gì?
+
+Mỗi 30 giây, hệ thống kiểm tra danh sách streamer bạn theo dõi. Ai đang live → ghi hình
+ngay; ai không live → bỏ qua. Khi phiên live kết thúc (hoặc file chạm 1.8 GB), hệ thống
+đóng gói thành `.mp4` rồi tải lên Telegram, sau đó giữ file trên máy 48 giờ rồi tự xoá.
+
+```
+favorites.txt
+     │  (mỗi 30 giây)
+     ▼
+[1] Kiểm tra phòng        GET /api/chatvideocontext/<room>/
+     │                     ├─ offline / private / away  → bỏ qua
+     │                     └─ public + link HLS         → ghi
+     ▼
+[2] Ghi luồng HLS         tải segment 64 KB xuống thư mục tạm
+     │                     (hỗ trợ cả MPEG-TS và fMP4 #EXT-X-MAP)
+     ▼
+[3] Đóng gói MP4         ffmpeg -c copy  (không encode lại → CPU rất thấp)
+     │                     nếu ffmpeg lỗi → GIỮ file .ts/.m4s, không mất dữ liệu
+     ▼
+[4] Tải lên Telegram     Telethon MTProto, có thanh tiến độ, file tới 2 GB
+     │
+     ▼
+[5] Lưu 48 giờ           hết hạn thì tự xoá; máy gần đầy (<400 MB) thì xoá sớm file cũ nhất
+```
+
+**Điểm mạnh thiết kế cho điện thoại:**
+
+| Đặc điểm | Ý nghĩa thực tế |
+|---|---|
+| Ghi theo chunk 64 KB xuống đĩa | RAM dùng < 70 MB, không bị Android "Low Memory Killer" giết |
+| `ffmpeg -c copy` (không encode) | CPU < 2 %, máy không nóng, pin không tụt nhanh |
+| Chia file tại 1.8 GB | Luôn vừa giới hạn 2 GB của Telegram |
+| Giữ file thô khi mux lỗi | Mất ffmpeg cũng **không mất** cả phiên ghi |
+| `termux-wake-lock` tự động | Tắt màn hình vẫn ghi tiếp |
+| Lệnh `doctor` | Chỉ ra chính xác lỗi nằm ở đâu (mạng, ffmpeg, quyền ghi, proxy...) |
+
+---
+
+## 2. Điện thoại cần chuẩn bị gì?
+
+| Yêu cầu | Ghi chú |
+|---|---|
+| Android 8.0 trở lên | Không cần root |
+| **Termux** cài từ **F-Droid** | ⚠️ Bản trên CH Play đã lỗi thời, **không dùng** |
+| **Termux:API** (cùng nguồn F-Droid) | Để dùng `termux-wake-lock`, `termux-setup-storage` |
+| ~500 MB trống | Cho code + thư viện + thư mục ghi tạm |
+| Wi-Fi ổn định + cục sạc | Treo 24/7 nên cắm sạc |
+| Tài khoản Telegram | Để tạo bot và nhận video |
+
+### Cài Termux đúng cách
+
+1. Vào **F-Droid**: <https://f-droid.org/packages/com.termux/> → tải APK → cài.
+2. Cài tiếp **Termux:API**: <https://f-droid.org/packages/com.termux.api/>
+3. Mở **Cài đặt Android → Ứng dụng → Termux → Pin → Không hạn chế (Unrestricted)**.
+   (Bắt buộc, nếu không Android sẽ giết tiến trình khi tắt màn hình.)
+4. Mở Termux, gõ `termux-wake-lock` thử — nếu báo "command not found" thì chưa cài Termux:API.
+
+---
+
+## 3. Cài đặt (người mới bắt đầu từ đây)
+
+### Cách A — Cài tự động bằng 1 lệnh (khuyến nghị)
+
+Mở Termux và dán **từng dòng** sau (dấu `#` là chú thích, không cần gõ):
 
 ```bash
-# 1. Cập nhật hệ thống Termux
-pkg update && pkg upgrade -y
+# 1. Cài git để tải code
+pkg update -y && pkg install -y git python
 
-# 2. Cài đặt Python, FFmpeg, Git và Termux API
-pkg install python ffmpeg git termux-api -y
-
-# 3. Cấp quyền bộ nhớ thiết bị cho Termux (bấm Cho phép trên màn hình)
-termux-setup-storage
-
-# 4. Cài đặt thư viện Telethon (+ PySocks nếu dùng proxy SOCKS5)
-pip install telethon pysocks
-
-# 5. Tải mã nguồn dự án về máy
+# 2. Tải code về máy
+cd ~
 git clone https://github.com/nghiart/cb2te.git
 cd cb2te
+
+# 3. Chạy trình cài đặt tự động
+bash install_termux.sh
+```
+
+Script sẽ tự: cài `python ffmpeg termux-api`, cấp quyền bộ nhớ, cài thư viện Python,
+tạo `settings.txt` + `favorites.txt`, và chạy kiểm tra `doctor`.
+
+> Nếu `git clone` báo lỗi mạng, xem [mục 12](#12-khắc-phục-sự-cố).
+
+### Cách B — Cài thủ công (hiểu rõ từng bước)
+
+```bash
+# 1. Cập nhật Termux
+pkg update -y && pkg upgrade -y
+
+# 2. Cài Python, FFmpeg (bắt buộc), Git, Termux API
+pkg install -y python ffmpeg git termux-api
+
+# 3. Cho phép Termux truy cập bộ nhớ (bấm "Cho phép" khi Android hỏi)
+termux-setup-storage
+
+# 4. Tải code
+cd ~
+git clone https://github.com/nghiart/cb2te.git
+cd cb2te
+
+# 5. Cài thư viện Python
+pip install -r requirements.txt
+#    (nếu chưa có file requirements.txt: pip install telethon pysocks "python-socks[asyncio]")
+
+# 6. Tạo file cấu hình từ mẫu
+cp settings.example.txt settings.txt
+cp favorites.example.txt favorites.txt
+
+# 7. Kiểm tra
+python3 rec2_app.py doctor --probe 0
+```
+
+Nếu bước 7 in ra `✅ [PASS] FFmpeg` và `✅ [PASS] Thư mục recordings` là bạn đã cài đúng.
+
+### Cài vào thẻ nhớ / thư mục khác (tuỳ chọn)
+
+Mặc định video ghi vào `recordings/` trong thư mục dự án. Muốn lưu ra bộ nhớ chung:
+
+```bash
+mkdir -p /sdcard/CB2TE
+export RECORDINGS_DIR="/sdcard/CB2TE"
+```
+
+Muốn giữ cấu hình này sau khi đóng Termux, thêm dòng `export RECORDINGS_DIR=...` vào `~/.bashrc`:
+
+```bash
+echo 'export RECORDINGS_DIR="/sdcard/CB2TE"' >> ~/.bashrc
 ```
 
 ---
 
-## ⚙️ Cấu hình hệ thống
+## 4. Lấy thông tin Telegram
 
-Dự án cung cấp sẵn 2 file mẫu: `settings.example.txt` và `favorites.example.txt`.
+Bạn cần **4 thứ**: `API_ID`, `API_HASH`, `BOT_TOKEN`, `CHAT_ID` (+ `ADMIN_IDS` của bạn).
 
-### 1. Cấu hình Telegram & Hệ thống (`settings.txt`)
+### 4.1. `API_ID` và `API_HASH`
 
-Tạo file cấu hình từ file mẫu:
-```bash
-cp settings.example.txt settings.txt
-nano settings.txt
-```
+1. Mở <https://my.telegram.org> → đăng nhập bằng số điện thoại Telegram.
+2. Chọn **API development tools**.
+3. Điền **App title** (ví dụ `cb2te`) và **Short name** (ví dụ `cb2te`) → **Create application**.
+4. Copy `App api_id` (một dãy số) và `App api_hash` (32 ký tự).
 
-Nội dung cấu hình chi tiết:
+> `API_HASH` là bí mật, không đăng lên mạng, không commit lên GitHub.
+
+### 4.2. `BOT_TOKEN` (tạo bot)
+
+1. Trong Telegram, tìm **@BotFather** → bấm **Start**.
+2. Gõ `/newbot` → đặt tên hiển thị (ví dụ `CB2TE Recorder`) → đặt username kết thúc bằng `bot`
+   (ví dụ `cb2te_recorder_bot`).
+3. BotFather trả về chuỗi dạng `123456789:ABCdef...` — đó là `BOT_TOKEN`.
+
+**Quan trọng nếu muốn điều khiển bot trong Group:** gõ `/setprivacy` → chọn bot → **Disable**
+(để bot đọc được lệnh trong group). Nếu không, hãy nhắn riêng cho bot.
+
+### 4.3. `CHAT_ID` (nơi nhận video)
+
+**Cách dễ nhất:**
+
+1. Tạo một **Group** (hoặc Channel) trên Telegram, ví dụ `CB2TE Videos`.
+2. Thêm bot của bạn vào group (**Add members** → tìm username bot).
+3. Gửi 1 tin nhắn bất kỳ vào group.
+4. Mở trên trình duyệt điện thoại:
+   `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates`
+   (thay `<BOT_TOKEN>` bằng token thật).
+5. Tìm `"chat":{"id":-1001234567890, ...}` → đó là `CHAT_ID` (nhớ giữ **dấu trừ**).
+6. Trong group, cấp quyền cho bot gửi file: **Group → Administrators → Add Admin → chọn bot**
+   (hoặc ít nhất bật quyền gửi media).
+
+> Nếu dùng **Channel**: thêm bot làm **Admin** của channel rồi lấy `chat_id` tương tự
+> (thường có dạng `-100...`).
+
+### 4.4. `ADMIN_IDS` (ai được ra lệnh cho bot)
+
+1. Nhắn cho **@userinfobot** trên Telegram → nó trả về `Id: 123456789`.
+2. Đó là `ADMIN_IDS` của bạn. Nhiều người dùng thì cách nhau dấu phẩy: `123,456`.
+
+---
+
+## 5. Cấu hình `settings.txt`
+
+Mở file: `nano settings.txt` (lưu: `Ctrl+O` → `Enter`; thoát: `Ctrl+X`).
+
 ```ini
-# 1. Lấy api_id và api_hash tại: https://my.telegram.org
+# 1. Telegram API (lấy ở my.telegram.org)
 API_ID = 12345678
 API_HASH = "0123456789abcdef0123456789abcdef"
 
-# 2. Bot Token tạo từ @BotFather trên Telegram
+# 2. Token bot (lấy từ @BotFather)
 BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
 
-# 3. ID của Group hoặc Channel nhận video (có dấu trừ phía trước)
-# Nhớ thêm Bot vào Group/Channel và cấp quyền gửi file
+# 3. Nơi nhận video (Group/Channel, có dấu trừ)
 CHAT_ID = -1001234567890
 
-# 4. Telegram User ID của Admin (người có quyền gõ lệnh bot)
+# 4. Telegram User ID của bạn (người được điều khiển bot)
 ADMIN_IDS = 123456789
 
-# 5. Thời gian giữ video trên máy trước khi tự xóa (tính bằng giờ, mặc định: 48)
+# 5. Giữ video trên máy bao nhiêu giờ sau khi upload (mặc định 48)
 RETENTION_HOURS = 48
 
-# 6. Số phòng ghi đồng thời tối đa (khuyến nghị để là 2 trên điện thoại)
+# 6. Số phòng ghi đồng thời (điện thoại nên để 1 hoặc 2)
 MAX_CONCURRENT = 2
 
-# 7. Bộ nhớ trống tối thiểu (MB) để kích hoạt xóa khẩn cấp khi sắp đầy đĩa
+# 7. Dung lượng trống tối thiểu (MB) để kích hoạt dọn dẹp khẩn cấp
 MIN_FREE_MB = 400
 
-# 8. Proxy HTTP hoặc SOCKS5 (để trống nếu không dùng)
-PROXY = 
+# 8. Proxy (để trống nếu không dùng)
+PROXY =
 ```
 
-### 2. Danh sách theo dõi tự động (`favorites.txt`)
+| Khoá | Bắt buộc | Ý nghĩa | Mặc định |
+|---|---|---|---|
+| `API_ID` | ✅ | Số lấy từ my.telegram.org | — |
+| `API_HASH` | ✅ | Chuỗi bí mật lấy từ my.telegram.org | — |
+| `BOT_TOKEN` | ✅ | Token của bot | — |
+| `CHAT_ID` | ✅ | Nơi nhận video, **có dấu trừ** | — |
+| `ADMIN_IDS` | ✅ | ID người được dùng lệnh bot, cách nhau dấu phẩy | — |
+| `RETENTION_HOURS` | ❌ | Số giờ giữ file sau upload. **Không đặt 0** (sẽ xoá ngay). Muốn giữ lâu: `720` (30 ngày) | `48` |
+| `MAX_CONCURRENT` | ❌ | Số phòng ghi cùng lúc. Máy yếu để `1` | `2` |
+| `MIN_FREE_MB` | ❌ | Dưới ngưỡng này sẽ xoá bớt file cũ. `0` = tắt | `400` |
+| `PROXY` | ❌ | `http://host:port`, `socks5://user:pass@host:1080` (xem mục 12) | trống |
 
-Tạo file danh sách theo dõi từ file mẫu:
-```bash
-cp favorites.example.txt favorites.txt
-nano favorites.txt
-```
+**Nâng cao:** parser còn chấp nhận tên khoá có tiền tố `TELEGRAM_`
+(`TELEGRAM_API_ID`, `TELEGRAM_BOT_TOKEN`...), `ADMIN_ID`/`ADMINS`,
+`MAX_CONCURRENT_RECORDINGS`, `MIN_MB`.
 
-Điền username hoặc link mỗi streamer trên một dòng:
+---
+
+## 6. Danh sách theo dõi `favorites.txt`
+
+Mỗi dòng một streamer — có thể là **username** hoặc **link**:
+
 ```text
 sweet_girl
 hot_model_99
 https://chaturbate.com/another_streamer/
-# streamer_tam_nghi  <-- Dấu # ở đầu dòng để tạm dừng theo dõi
+# streamer_tam_nghi        ← dấu # ở đầu = tạm dừng, không xoá
 ```
+
+- Tên có thể viết hoa/thường, có hoặc không có `@`.
+- Dòng bắt đầu bằng `#` sẽ bị bỏ qua (cách "tạm nghỉ" một người).
+- Có thể thêm ghi chú phía sau: `sweet_girl  tên hiển thị`.
+- Sửa xong **không cần khởi động lại** — hệ thống đọc lại danh sách mỗi 30 giây.
+- Nếu chạy `bot`, bạn còn có thể thêm/xoá bằng lệnh `/add`, `/del` ngay trong Telegram.
 
 ---
 
-## 🚀 Hướng dẫn vận hành
+## 7. Chạy 24/7
 
-### 1. Khởi chạy toàn bộ hệ thống 24/7 (Daemon + Bot + Auto Upload)
-Đây là chế độ chính để treo máy:
+### 7.1. Chạy daemon (bot + ghi hình + upload + dọn dẹp)
+
 ```bash
+cd ~/cb2te
 python3 rec2_app.py bot
 ```
-Khi chạy lệnh này:
-- CPU được giữ hoạt động liên tục khi tắt màn hình (`termux-wake-lock`).
-- Hệ thống thăm dò `favorites.txt` cứ mỗi 30–35 giây.
-- Streamer online sẽ tự động được ghi hình -> tự mux MP4 -> đưa vào hàng đợi upload lên Telegram -> đặt lịch xóa sau 48h.
-- Để tắt ứng dụng an toàn: Nhấn `Ctrl + C` (hệ thống sẽ tự đóng gói phần video đã tải và giải phóng wake-lock).
 
-### 2. Xem trạng thái hệ thống qua Terminal
+Khi chạy, hệ thống sẽ:
+
+- bật `termux-wake-lock` (giữ CPU chạy khi tắt màn hình);
+- kiểm tra streamer mỗi 30 giây;
+- ghi → mux → upload → đặt lịch xoá 48 giờ;
+- nhận lệnh từ Telegram (`/status`, `/rec`, `/stop`...).
+
+### 7.2. Giữ nó sống khi tắt màn hình / đóng Termux
+
+| Việc cần làm | Cách làm |
+|---|---|
+| Không bị Android giết | Cài đặt → Ứng dụng → Termux → **Pin: Không hạn chế** |
+| Hiện thông báo Termux | Kéo thanh thông báo → **Acquire wakelock** (hệ thống tự bật khi chạy `bot`) |
+| Đóng Termux mà vẫn chạy | Cài **Termux:Boot** (F-Droid) và tạo `~/.termux/boot/start.sh` chứa lệnh chạy |
+| Chạy nền trong 1 phiên | `pkg install tmux` → `tmux new -s cb` → chạy lệnh → `Ctrl+B` rồi `D` để thoát tạm |
+
+Ví dụ file `~/.termux/boot/start.sh` (tự chạy khi khởi động máy):
+
 ```bash
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+cd ~/cb2te
+nohup python3 rec2_app.py bot > ~/cb2te/daemon.log 2>&1 &
+```
+
+Cấp quyền chạy: `chmod +x ~/.termux/boot/start.sh`.
+
+### 7.3. Tắt an toàn
+
+Nhấn **Ctrl + C** trong Termux. Hệ thống sẽ **đợi tối đa 120 giây** để đóng gói nốt file
+đang ghi rồi mới thoát — đừng tắt ngay, hãy đợi thấy dòng `Daemon stopped gracefully.`
+
+> Nếu lỡ tắt ngang: lần sau mở lên, chạy `python3 rec2_app.py remux` để đóng gói lại
+> các file `.ts`/`.m4s` còn sót (xem [mục 10](#10-kiểm-tra-sức-khoẻ--chẩn-đoán)).
+
+---
+
+## 8. Lệnh bot Telegram
+
+Nhắn trực tiếp cho bot (hoặc trong group nếu đã tắt privacy):
+
+| Lệnh | Chức năng |
+|---|---|
+| `/status` | Xem phòng đang ghi, dung lượng trống, hàng đợi upload |
+| `/rec <user>` | Bắt đầu ghi một streamer ngay (không cần có trong favorites) |
+| `/stop <user>` | Dừng ghi một streamer, đóng gói file hiện tại |
+| `/stop all` | Dừng tất cả |
+| `/fav` | Xem danh sách đang theo dõi |
+| `/add <user>` | Thêm vào `favorites.txt` và bắt đầu theo dõi |
+| `/del <user>` | Xoá khỏi `favorites.txt` |
+| `/files` | Danh sách video đã upload trong 48 h + đếm ngược xoá |
+| `/help` | Hướng dẫn nhanh |
+
+Ví dụ:
+
+```text
+/rec sweet_girl
+/status
+/files
+/stop sweet_girl
+```
+
+> Chỉ `ADMIN_IDS` trong `settings.txt` mới ra lệnh được. Người khác nhắn bot sẽ bị bỏ qua.
+
+---
+
+## 9. Lệnh trong Termux (CLI)
+
+Cú pháp chung (**cờ phải đứng trước lệnh con**):
+
+```bash
+python3 rec2_app.py [--settings FILE] [--favorites FILE] [--recordings-dir DIR] [--db FILE] [-v] <lệnh>
+```
+
+| Lệnh | Việc nó làm |
+|---|---|
+| `python3 rec2_app.py bot` | Chạy daemon 24/7 (bot + ghi hình + upload + dọn dẹp) |
+| `python3 rec2_app.py status` | In nhanh: thư mục ghi, dung lượng trống, số streamer, video đã upload |
+| `python3 rec2_app.py rec <user>` | Ghi 1 streamer ngay từ terminal (Ctrl+C để dừng) |
+| `python3 rec2_app.py doctor` | Chẩn đoán toàn bộ pipeline (xem mục 10) |
+| `python3 rec2_app.py remux` | Đóng gói lại các file `.ts`/`.m4s` thành `.mp4` |
+
+Ví dụ:
+
+```bash
+# xem trạng thái
 python3 rec2_app.py status
-```
-Hiển thị dung lượng bộ nhớ trống, danh sách streamer đang theo dõi và các video đã upload trong 48 giờ qua.
 
-### 3. Ghi hình trực tiếp 1 streamer từ dòng lệnh (Không qua Bot)
-```bash
-python3 rec2_app.py rec <username_hoặc_link>
-```
-*Ví dụ: `python3 rec2_app.py rec sweet_girl`*
+# ghi thử 1 streamer, xem log chi tiết
+python3 rec2_app.py -v rec sweet_girl
 
-### 4. Chẩn đoán khi không thấy video nào được lưu
-```bash
-python3 rec2_app.py doctor            # kiểm tra toàn bộ pipeline + 1 streamer trong favorites
-python3 rec2_app.py doctor --probe 3  # kiểm tra 3 streamer
-python3 rec2_app.py doctor sweet_girl # kiểm tra 1 streamer cụ thể
-```
-In ra bảng **PASS / WARN / FAIL** cho: ffmpeg, ffprobe, quyền ghi + dung lượng, `settings.txt`, proxy, termux-api, Telethon, history, probe Chaturbate, playlist HLS, init segment (fMP4) và tải thử segment.
+# ghi vào thư mục khác
+python3 rec2_app.py --recordings-dir /sdcard/CB2TE rec sweet_girl
 
-### 5. Đóng gói lại file thô sau khi sửa ffmpeg
-Nếu hệ thống từng giữ lại file `.ts`/`.m4s` (vì mux lỗi lúc ghi):
-```bash
-python3 rec2_app.py remux                # quét thư mục recordings/
-python3 rec2_app.py remux recordings/    # hoặc chỉ định đường dẫn
+# đóng gói lại toàn bộ file thô còn sót
+python3 rec2_app.py remux
 ```
 
 ---
 
-## 💬 Danh sách câu lệnh Telegram Bot
+## 10. Kiểm tra sức khoẻ & chẩn đoán
 
-Sau khi khởi chạy daemon `python3 rec2_app.py bot`, bạn có thể nhắn tin trực tiếp cho Bot hoặc nhắn trong Group Admin:
-
-| Lệnh | Mô tả |
-| :--- | :--- |
-| `/status` | Báo cáo chi tiết các phòng đang ghi, RAM, dung lượng trống của máy và tiến độ hàng đợi upload. |
-| `/rec <user>` | Bắt đầu theo dõi và ghi hình ngay lập tức một streamer (kể cả khi chưa có trong favorites). |
-| `/stop <user>` | Dừng phiên ghi hình của một streamer cụ thể và đóng gói video hiện tại. |
-| `/stop all` | Dừng tất cả các phiên ghi hình đang chạy. |
-| `/fav` | Xem danh sách các streamer đang được theo dõi trong `favorites.txt`. |
-| `/add <user>` | Thêm một streamer mới vào `favorites.txt` và bắt đầu theo dõi. |
-| `/del <user>` | Xóa streamer khỏi danh sách `favorites.txt`. |
-| `/files` | Xem danh sách video đã tải lên trong 48h qua kèm thời gian đếm ngược trước khi tự xóa. |
-| `/help` | Hiển thị bảng trợ giúp danh sách câu lệnh. |
-
----
-
-## 🧪 Kiểm thử tự động (Unit & Integration Tests)
-
-Hệ thống được phát triển theo phương pháp Test-Driven Development (TDD) với độ bao phủ kiểm thử toàn diện:
+### 10.1. `doctor` — "bác sĩ" của hệ thống
 
 ```bash
-# Chạy toàn bộ 120 bài kiểm thử trong dự án
-python3 -m unittest discover -s tests -v
+python3 rec2_app.py doctor              # kiểm tra + thử 1 streamer trong favorites
+python3 rec2_app.py doctor --probe 3    # thử 3 streamer
+python3 rec2_app.py doctor sweet_girl   # thử đúng 1 tên
+python3 rec2_app.py doctor --probe 0    # chỉ kiểm tra máy, không dùng mạng
+```
+
+Kết quả gồm 3 mức: **✅ PASS**, **⚠️ WARN**, **❌ FAIL**, kèm gợi ý sửa ngay bên dưới:
+
+```
+✅ [PASS] FFmpeg            /data/data/com.termux/files/usr/bin/ffmpeg — ffmpeg version 7.1
+✅ [PASS] Thư mục recordings  .../recordings — trống 21000 MB (ngưỡng 400 MB)
+✅ [PASS] Proxy              socks5://10.0.0.2:1080
+✅ [PASS] Live sweet_girl    6 segment | MPEG-TS | variant 3 | segment mẫu 98432 B
+```
+
+Các mục được kiểm tra: môi trường Python, ffmpeg, ffprobe, thư mục ghi, thư mục tạm,
+`settings.txt`, proxy, Termux API, Telethon, `history.json`, và **probe thật** streamer
+(API → playlist → variant → init segment → tải thử segment).
+
+### 10.2. Xem log
+
+```bash
+python3 rec2_app.py -v bot            # log chi tiết ngay trên màn hình
+python3 rec2_app.py bot > bot.log 2>&1 &   # ghi log ra file
+tail -f bot.log                        # xem log trực tiếp
+```
+
+Các dòng đáng chú ý:
+
+| Dòng log | Nghĩa |
+|---|---|
+| `Recording <room> from ...` | Đã bắt đầu ghi |
+| `saved ...mp4` | Đóng gói + lưu thành công |
+| `kept RAW ... instead of losing the session` | ffmpeg lỗi, **file vẫn được giữ** dạng `.ts` |
+| `Room ... not recordable [geo_blocked]` | IP bị chặn vùng → cần `PROXY` |
+| `kept RAW` + `muxing failed` | Cài/sửa ffmpeg rồi chạy `remux` |
+
+### 10.3. Đóng gói lại file thô
+
+Nếu từng thấy file `.ts`/`.m4s` trong `recordings/`:
+
+```bash
+pkg install ffmpeg -y      # đảm bảo ffmpeg đã có
+python3 rec2_app.py remux
 ```
 
 ---
 
-## 📄 Cấu trúc thư mục dự án
+## 11. Cập nhật phiên bản mới
+
+```bash
+cd ~/cb2te
+git pull                          # lấy code mới
+pip install -r requirements.txt   # cập nhật thư viện (nếu có thay đổi)
+python3 rec2_app.py doctor        # kiểm tra lại
+```
+
+Sau đó dừng daemon cũ (**Ctrl + C**) và chạy lại `python3 rec2_app.py bot`.
+
+**Lưu ý an toàn:**
+
+- `settings.txt`, `favorites.txt`, `recordings/`, `history.json`, file `.session` **không**
+  bị `git pull` ghi đè (đã nằm trong `.gitignore`) → cấu hình của bạn được giữ nguyên.
+- Nếu `git pull` báo có thay đổi cục bộ: `git stash` → `git pull` → `git stash pop`.
+- Muốn quay lại bản cũ:
+  ```bash
+  git log --oneline -5        # xem các bản
+  git switch --detach <mã>    # tạm quay lại bản đó
+  git switch main             # quay lại mới nhất
+  ```
+- Cài lại sạch (giữ cấu hình): xoá thư mục code rồi `git clone` lại, sau đó copy
+  `settings.txt`, `favorites.txt`, `history.json` từ bản cũ sang.
+
+---
+
+## 12. Khắc phục sự cố
+
+> Mẹo: **luôn chạy `python3 rec2_app.py doctor` trước** — nó chỉ đúng mục đang lỗi.
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+|---|---|---|
+| Không có video nào, log im lặng | Thiếu ffmpeg / API bị chặn / geo-block | `pkg install ffmpeg`; chạy `doctor`; đặt `PROXY` |
+| Có `.ts`/`.m4s` mà không có `.mp4` | ffmpeg lỗi hoặc chưa cài | `pkg install ffmpeg` → `python3 rec2_app.py remux` |
+| `doctor` báo `HLS ... HTTP 403` | Token hết hạn hoặc IP bị chặn | Thử lại; nếu vẫn lỗi → dùng `PROXY` |
+| `doctor` báo `geo_blocked` | Chaturbate giới hạn theo quốc gia/IP | Đặt `PROXY` ở quốc gia được phép |
+| `ffmpeg: not found` | Chưa cài | `pkg install ffmpeg` |
+| `ModuleNotFoundError: telethon` | Thiếu thư viện | `pip install -r requirements.txt` |
+| Bot không trả lời | Sai `ADMIN_IDS`, hoặc bot trong group bị privacy | Nhắn riêng bot; `/setprivacy` → Disable; kiểm tra ID bằng `@userinfobot` |
+| Bot báo lỗi gửi file vào group | Bot chưa có quyền | Group → Administrators → thêm bot, bật quyền gửi media |
+| Upload kẹt ở `FloodWait` | Telegram giới hạn tần suất | Đợi vài phút; giảm `MAX_CONCURRENT` |
+| Máy nóng / tụt pin nhanh | Ghi quá nhiều phòng | Đặt `MAX_CONCURRENT = 1`; cắm sạc |
+| Đầy bộ nhớ | Nhiều video 48 h | Giảm `RETENTION_HOURS`, tăng `MIN_FREE_MB`, hoặc `export RECORDINGS_DIR=/sdcard/...` |
+| Mất video khi Ctrl+C | Mux chưa xong | Bản mới đợi tới 120 s; đợi dòng `Daemon stopped gracefully.` |
+| `database is locked` (Telethon) | Chạy 2 bot cùng lúc | Tắt hết, chỉ chạy 1 `bot`; xoá `cb2te_bot_session.session-journal` nếu còn |
+| `git clone` lỗi mạng | DNS/TLS bị chặn | Thử Wi-Fi khác/4G; `git config --global http.sslBackend openssl` |
+
+Phân tích chi tiết sự cố "không lưu phiên live" (nguyên nhân gốc + cách sửa trong code):
+[`docs/2026-11-10-live-stream-not-saved-diagnosis.md`](docs/2026-11-10-live-stream-not-saved-diagnosis.md)
+
+---
+
+## 13. Câu hỏi thường gặp
+
+**Có cần root không?**
+Không. Toàn bộ chạy trong Termux với quyền của người dùng thường.
+
+**Tốn bao nhiêu RAM?**
+Khoảng 60–70 MB khi ghi 1 phòng; mỗi phòng thêm ~10–20 MB. Máy 3 GB RAM ghi 1–2 phòng thoải mái.
+
+**Ghi được tối đa bao nhiêu phòng?**
+Phụ thuộc CPU/mạng. Điện thoại tầm trung: **1–2**. Đặt `MAX_CONCURRENT` tương ứng.
+
+**File lớn nhất là bao nhiêu?**
+Mỗi file tối đa **1.8 GB** (để vừa giới hạn 2 GB của Telegram). Dài hơn sẽ tự chia file mới.
+
+**Video được lưu bao lâu?**
+Trên máy: `RETENTION_HOURS` giờ sau khi upload (mặc định 48). Trên Telegram: vĩnh viễn
+(trừ khi bạn xoá). Máy gần đầy (<`MIN_FREE_MB`) sẽ xoá sớm file cũ nhất.
+
+**Tắt máy / mất mạng thì sao?**
+Phiên đang ghi dừng; phần đã tải vẫn được đóng gói và upload ở lần khởi động sau
+(nếu còn file). Bật Termux:Boot để tự chạy lại.
+
+**Có ghi được phòng private / ticket show không?**
+Không. Hệ thống chỉ ghi phòng `public`.
+
+**Không muốn dùng Telegram thì sao?**
+Vẫn dùng được `python3 rec2_app.py rec <user>` để ghi ra máy; phần bot/upload chỉ cần
+khi bạn muốn nhận video qua Telegram.
+
+**`rec2-depseek.py` là gì?**
+Bản script cũ (legacy, chạy độc lập). **Không cần dùng** — bản chính thức là `rec2_app.py`.
+Giữ lại để tham khảo.
+
+---
+
+## 14. Cấu trúc dự án & kiểm thử
 
 ```text
 cb2te/
 ├── bot/
-│   ├── handlers.py          # Bộ xử lý lệnh Telegram Bot
-│   ├── telegram_bot.py      # Khởi tạo Telethon TelegramClient
-│   └── uploader.py          # Hàng đợi upload MTProto 2GB với thanh tiến độ
+│   ├── handlers.py          # Xử lý lệnh Telegram (/status, /rec, /stop...)
+│   ├── telegram_bot.py      # Khởi tạo Telethon client (+ proxy dict)
+│   └── uploader.py          # Hàng đợi upload MTProto, tiến độ, 2 GB
 ├── core/
-│   ├── android.py           # Android wake-lock, memory trim & storage helpers
-│   ├── config.py            # Parser cấu hình settings.txt & favorites.txt
-│   ├── doctor.py            # Chẩn đoán pipeline (PASS/WARN/FAIL) cho lệnh `doctor`
-│   ├── muxer.py             # FFmpeg stream-copy muxer (3 chiến lược + timeout)
-│   ├── net.py               # Header trình duyệt, proxy HTTP/SOCKS5, HTTP client
-│   ├── recorder.py          # HLS recorder (MPEG-TS + fMP4/CMAF), probe 3 tầng
-│   └── task_manager.py      # Bộ điều phối đa luồng & giới hạn concurrency
+│   ├── android.py           # wake-lock, giải phóng RAM, thư mục ghi
+│   ├── config.py            # Đọc settings.txt / favorites.txt
+│   ├── doctor.py            # Chẩn đoán PASS/WARN/FAIL
+│   ├── muxer.py             # ffmpeg stream-copy (3 chiến lược + timeout)
+│   ├── net.py               # Header trình duyệt, proxy HTTP/SOCKS5
+│   ├── recorder.py          # Probe phòng + ghi HLS (TS & fMP4), re-probe
+│   └── task_manager.py      # Điều phối đa luồng, giới hạn đồng thời
 ├── storage/
-│   ├── cleaner.py           # Quét dọn video sau 48h & xả khẩn cấp đĩa trống
-│   └── history.py           # Quản lý cơ sở dữ liệu lịch sử file (history.json)
+│   ├── cleaner.py           # Xoá sau 48 h + xả khẩn cấp khi đầy đĩa
+│   └── history.py           # history.json (lịch sử file đã upload)
+├── tests/                   # 120 bài kiểm thử tự động
 ├── docs/                    # Thiết kế + báo cáo phân tích sự cố
-├── tests/                   # Toàn bộ test suite tự động (120 unit/e2e tests)
-├── rec2_app.py              # File chạy chính (CLI & Daemon 24/7)
-├── settings.example.txt     # File cấu hình mẫu
-├── favorites.example.txt    # Danh sách streamer mẫu
-└── README.md                # Hướng dẫn sử dụng
+├── install_termux.sh        # Trình cài đặt tự động cho Termux
+├── requirements.txt         # Thư viện Python cần thiết
+├── rec2_app.py              # Chương trình chính (bot/status/rec/doctor/remux)
+├── rec2-depseek.py          # Script cũ (legacy, không cần dùng)
+├── settings.example.txt     # Mẫu cấu hình
+└── favorites.example.txt    # Mẫu danh sách theo dõi
+```
+
+Chạy kiểm thử (không bắt buộc khi sử dụng):
+
+```bash
+python3 -m unittest discover -s tests -v     # 120 test
 ```
 
 ---
 
-## ⚠️ Lưu ý khi vận hành thực tế trên điện thoại
-- Cắm sạc và kết nối Wi-Fi ổn định nếu bạn muốn treo máy 24/7.
-- Thư mục lưu trữ mặc định là `recordings/` trong thư mục dự án. Bạn có thể đổi vị trí lưu sang bộ nhớ chung hoặc thẻ nhớ ngoài bằng biến môi trường:
-  ```bash
-  export RECORDINGS_DIR="/sdcard/Movies/Recordings"
-  ```
-- Nếu thư mục tạm (`$TMPDIR`) và `RECORDINGS_DIR` khác ổ đĩa, hệ thống vẫn an toàn (dùng copy+unlink thay vì `rename`).
-- **Chaturbate chặn theo IP (geo-block)**: nếu `doctor` báo `geo_blocked` hoặc `HLS ... HTTP 403`, hãy đặt `PROXY` trong `settings.txt`:
-  ```ini
-  PROXY = socks5://user:pass@host:1080   # cần: pip install pysocks
-  # hoặc
-  PROXY = http://user:pass@host:8080
-  ```
-
----
-
-## 🔧 Khắc phục sự cố
-
-Xem báo cáo phân tích đầy đủ: [docs/2026-11-10-live-stream-not-saved-diagnosis.md](docs/2026-11-10-live-stream-not-saved-diagnosis.md)
-
-| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
-| :--- | :--- | :--- |
-| Không có video nào, log im lặng | thiếu ffmpeg / API bị chặn / geo-block | `python3 rec2_app.py doctor` |
-| Có file `.ts`/`.m4s` nhưng không có `.mp4` | ffmpeg lỗi hoặc chưa cài | `pkg install ffmpeg` rồi `python3 rec2_app.py remux` |
-| Phòng `public` nhưng báo offline | IP bị giới hạn CDN | đặt `PROXY` (ưu tiên cùng quốc gia) |
-| Dừng bằng `Ctrl+C` bị mất video | mux chưa xong | bản mới đã chờ tới 120 s; đợi thêm vài giây |
-| Proxy SOCKS5 không hoạt động | thiếu PySocks | `pip install pysocks` |
+<p align="center">
+  Làm bằng ☕ cho Termux · Báo lỗi/đề xuất: mở Issue trên GitHub
+</p>
