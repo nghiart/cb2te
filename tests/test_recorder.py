@@ -79,7 +79,7 @@ class TestRecorder(unittest.TestCase):
 
     # --- probe_room tests ---
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_online_public_hls_source(self, mock_build_opener):
         resp_data = {
             "room_status": "public",
@@ -102,7 +102,7 @@ class TestRecorder(unittest.TestCase):
         self.assertEqual(info.width, 1920)
         self.assertEqual(info.height, 1080)
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_online_public_hls_url(self, mock_build_opener):
         resp_data = {
             "room_status": "public",
@@ -123,7 +123,7 @@ class TestRecorder(unittest.TestCase):
         self.assertEqual(info.width, 0)
         self.assertEqual(info.height, 0)
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_offline_status(self, mock_build_opener):
         resp_data = {"room_status": "offline"}
         mock_resp = MagicMock()
@@ -139,7 +139,7 @@ class TestRecorder(unittest.TestCase):
         self.assertEqual(info.room_id, "model3")
         self.assertEqual(info.hls_url, "")
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_private_status(self, mock_build_opener):
         resp_data = {
             "room_status": "private",
@@ -162,7 +162,7 @@ class TestRecorder(unittest.TestCase):
         self.assertFalse(info.is_live)
         self.assertEqual(info.room_id, "")
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_network_error_handles_gracefully(self, mock_build_opener):
         mock_opener = MagicMock()
         mock_opener.open.side_effect = urllib.error.URLError("Connection refused")
@@ -172,7 +172,7 @@ class TestRecorder(unittest.TestCase):
         self.assertFalse(info.is_live)
         self.assertEqual(info.room_id, "model_err")
 
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_invalid_json_handles_gracefully(self, mock_build_opener):
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"<html>Cloudflare error</html>"
@@ -186,8 +186,8 @@ class TestRecorder(unittest.TestCase):
         self.assertFalse(info.is_live)
         self.assertEqual(info.room_id, "model_json_err")
 
-    @patch("core.recorder.urllib.request.ProxyHandler")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.ProxyHandler")
+    @patch("core.net.urllib.request.build_opener")
     def test_probe_room_with_proxy(self, mock_build_opener, mock_proxy_handler):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"room_status": "offline"}).encode("utf-8")
@@ -211,7 +211,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_normal_flow_and_cleanup(self, mock_build_opener, mock_mux, mock_release_mem):
         playlist_m3u8 = (
             "#EXTM3U\n"
@@ -244,7 +244,7 @@ class TestRecorder(unittest.TestCase):
         out_mp4 = self.tmp_dir / "normal.mp4"
 
         # Mock mux_stream_copy creating output file
-        def fake_mux(input_ts, output_mp4):
+        def fake_mux(input_ts, output_mp4, **kwargs):
             # Input .raw.ts must exist during muxing
             self.assertTrue(Path(input_ts).exists())
             self.assertGreater(Path(input_ts).stat().st_size, 0)
@@ -281,7 +281,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_max_bytes_rotation(self, mock_build_opener, mock_mux, mock_release_mem):
         # Playlist provides infinite segments
         counter = {"seg": 0}
@@ -305,7 +305,7 @@ class TestRecorder(unittest.TestCase):
 
         out_mp4 = self.tmp_dir / "rotated.mp4"
 
-        def fake_mux(input_ts, output_mp4):
+        def fake_mux(input_ts, output_mp4, **kwargs):
             Path(output_mp4).write_bytes(b"ROTATED_MP4")
             return True, ""
 
@@ -331,7 +331,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_consecutive_playlist_errors_terminates(self, mock_build_opener, mock_mux, mock_release_mem):
         counter = {"calls": 0}
 
@@ -359,7 +359,7 @@ class TestRecorder(unittest.TestCase):
 
         out_mp4 = self.tmp_dir / "stream_ended.mp4"
 
-        def fake_mux(input_ts, output_mp4):
+        def fake_mux(input_ts, output_mp4, **kwargs):
             Path(output_mp4).write_bytes(b"MUXED_AFTER_END")
             return True, ""
 
@@ -385,7 +385,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_zero_bytes_does_not_mux(self, mock_build_opener, mock_mux, mock_release_mem):
         # Playlist fetch always fails from the beginning
         mock_opener = MagicMock()
@@ -406,7 +406,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_mux_failure_cleans_up(self, mock_build_opener, mock_mux, mock_release_mem):
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"#EXTM3U\n#EXTINF:2.0,\nseg1.ts\n#EXT-X-ENDLIST\n"
@@ -440,7 +440,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_handles_master_playlist(self, mock_build_opener, mock_mux, mock_release_mem):
         master_m3u8 = (
             "#EXTM3U\n"
@@ -472,7 +472,7 @@ class TestRecorder(unittest.TestCase):
 
         out_mp4 = self.tmp_dir / "master_handled.mp4"
 
-        def fake_mux(input_ts, output_mp4):
+        def fake_mux(input_ts, output_mp4, **kwargs):
             Path(output_mp4).write_bytes(b"MASTER_MUXED_MP4")
             return True, ""
 
@@ -488,7 +488,7 @@ class TestRecorder(unittest.TestCase):
 
     @patch("core.recorder.release_os_memory")
     @patch("core.recorder.mux_stream_copy")
-    @patch("core.recorder.urllib.request.build_opener")
+    @patch("core.net.urllib.request.build_opener")
     def test_record_stream_seen_segments_fifo_pruning_preserves_sliding_window(
         self, mock_build_opener, mock_mux, mock_release_mem
     ):
@@ -530,7 +530,7 @@ class TestRecorder(unittest.TestCase):
 
         out_mp4 = self.tmp_dir / "fifo_prune.mp4"
 
-        def fake_mux(input_ts, output_mp4):
+        def fake_mux(input_ts, output_mp4, **kwargs):
             Path(output_mp4).write_bytes(b"FIFO_MUXED")
             return True, ""
 

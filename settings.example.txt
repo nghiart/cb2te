@@ -28,7 +28,9 @@ MAX_CONCURRENT = 2
 # 7. Dung lượng bộ nhớ trống tối thiểu (MB) để kích hoạt dọn dẹp khẩn cấp (mặc định: 400 MB)
 MIN_FREE_MB = 400
 
-# 8. Proxy HTTP hoặc SOCKS (để trống nếu không sử dụng)
-# Ví dụ: http://127.0.0.1:8080 hoặc socks5://127.0.0.1:1080
+# 8. Proxy (để trống nếu không sử dụng)
+# - HTTP/HTTPS:  http://user:pass@127.0.0.1:8080
+# - SOCKS5:      socks5://user:pass@127.0.0.1:1080   (cần: pip install pysocks)
+# Dùng proxy khi Chaturbate trả 403 hoặc "public nhưng không có hls_source" (geo-block).
 PROXY = 
 

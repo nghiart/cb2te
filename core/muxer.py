@@ -108,24 +108,34 @@ def inspect_media(path: Path | str) -> dict:
         return {}
 
 
-def mux_stream_copy(input_ts: Path | str, output_mp4: Path | str) -> tuple[bool, str]:
-    """Fast remux MPEG-TS into MP4 using stream copy (-c copy -movflags +faststart).
+def mux_stream_copy(
+    input_ts: Path | str,
+    output_mp4: Path | str,
+    *,
+    input_format: str = "",
+    timeout: float = 1800.0,
+) -> tuple[bool, str]:
+    """Fast remux a recorded spool (MPEG-TS or fMP4) into MP4.
 
-    Zero re-encoding CPU load, ideal for low-spec Android Termux devices.
+    Stream copy only (``-c copy``), zero re-encoding CPU load - suitable for
+    low-spec Android/Termux devices.  A ``+faststart`` remux needs to rewrite
+    the whole file, so a second attempt without it is made for full disks.
 
     Args:
-        input_ts: Path to input .ts file.
-        output_mp4: Target path for .mp4 file.
+        input_ts: Path to the raw spool file (``.ts`` or ``.m4s``).
+        output_mp4: Target path for the ``.mp4`` file.
+        input_format: Optional ffmpeg demuxer hint (``mpegts`` / ``mov``).
+        timeout: Hard limit in seconds; a stuck ffmpeg must not wedge Termux.
 
     Returns:
-        tuple[bool, str]: (True, "") on success, or (False, error_message) on failure.
+        tuple[bool, str]: ``(True, "")`` on success, or ``(False, reason)``.
     """
     in_path = Path(input_ts)
     out_path = Path(output_mp4)
 
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        return False, "ffmpeg binary not found"
+        return False, "ffmpeg binary not found (install it with: pkg install ffmpeg)"
 
     if not in_path.is_file():
         return False, f"Input file does not exist: {in_path}"
@@ -135,40 +145,81 @@ def mux_stream_copy(input_ts: Path | str, output_mp4: Path | str) -> tuple[bool,
     except OSError as e:
         return False, f"Failed to create output directory {out_path.parent}: {e}"
 
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-nostdin",
-        "-i", str(in_path),
-        "-c", "copy",
-        "-movflags", "+faststart",
-        str(out_path),
+    base = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    in_flags = [
+        "-fflags", "+genpts+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "-analyzeduration", "30M",
+        "-probesize", "30M",
+    ]
+    if input_format:
+        in_flags = ["-f", input_format, *in_flags]
+    out_flags = [
+        "-avoid_negative_ts", "make_zero",
+        "-max_muxing_queue_size", "4096",
+    ]
+    inputs = [*in_flags, "-i", str(in_path)]
+
+    attempts: list[list[str]] = [
+        # 1) Stream copy with faststart (best for Telegram/streaming playback).
+        [*base, *inputs, "-map", "0:v:0?", "-map", "0:a:0?",
+         "-c", "copy", "-movflags", "+faststart", *out_flags, str(out_path)],
+        # 2) Stream copy without faststart (needs no second disk pass).
+        [*base, *inputs, "-map", "0:v:0?", "-map", "0:a:0?",
+         "-c", "copy", *out_flags, str(out_path)],
+        # 3) Last resort: keep the video track even if audio cannot be copied.
+        [*base, *inputs, "-map", "0:v:0", "-c:v", "copy", "-an",
+         *out_flags, str(out_path)],
     ]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+    last_reason = "unknown ffmpeg failure"
+    for index, cmd in enumerate(attempts, 1):
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last_reason = f"ffmpeg timed out after {int(timeout)}s (attempt {index})"
+            logger.error(last_reason)
+            _safe_unlink(out_path)
+            continue
+        except Exception as e:
+            last_reason = f"Failed to run ffmpeg: {e}"
+            logger.error(last_reason)
+            _safe_unlink(out_path)
+            continue
+
         if proc.returncode == 0:
             if out_path.exists() and out_path.stat().st_size > 0:
                 return True, ""
-            return False, f"ffmpeg succeeded but output file {out_path} is missing or empty"
+            last_reason = f"ffmpeg succeeded but output file {out_path} is missing or empty"
+            logger.warning("%s (attempt %d)", last_reason, index)
+            _safe_unlink(out_path)
+            continue
 
-        err_msg = proc.stderr.strip() or f"ffmpeg exited with code {proc.returncode}"
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except OSError:
-                pass
-        return False, err_msg
-    except Exception as e:
-        if out_path.exists():
-            try:
-                out_path.unlink()
-            except OSError:
-                pass
-        return False, f"Failed to run ffmpeg: {e}"
+        stderr_tail = (proc.stderr or "").strip().splitlines()
+        brief = stderr_tail[-1][:300] if stderr_tail else f"exit code {proc.returncode}"
+        last_reason = f"ffmpeg exited with code {proc.returncode}: {brief}"
+        logger.warning("mux attempt %d failed: %s", index, brief)
+        _safe_unlink(out_path)
+
+    return False, last_reason
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass

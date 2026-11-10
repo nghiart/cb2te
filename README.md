@@ -20,6 +20,12 @@ Hệ thống ghi hình luồng phát sóng Chaturbate tự động, tiêu thụ 
 - **Vòng đời lưu trữ 48 giờ & Xả khẩn cấp**:
   - Video upload thành công được giữ lại trên máy trong 48 giờ (hoặc số giờ tuỳ chỉnh) trước khi tự động dọn dẹp.
   - Cơ chế **Emergency Disk Eviction**: Nếu bộ nhớ máy xuống dưới ngưỡng an toàn (mặc định 400 MB), hệ thống sẽ tự động dọn dẹp sớm các file đã tải cũ nhất để bảo vệ thiết bị.
+- **Không bao giờ mất dữ liệu đã ghi**:
+   - Hỗ trợ cả hai định dạng Chaturbate phát ra: MPEG-TS và **fMP4/CMAF** (`#EXT-X-MAP` + `.m4s`).
+   - Nếu ffmpeg lỗi/thiếu, file thô `.ts`/`.m4s` **được giữ lại** (không xoá) và vẫn được upload lên Telegram; đóng gói lại sau bằng `python3 rec2_app.py remux`.
+   - Tự probe lại khi token playlist hết hạn; hỗ trợ proxy HTTP và **SOCKS5** (PySocks).
+- **Tự chẩn đoán sự cố ngay trên máy**:
+   - `python3 rec2_app.py doctor` kiểm tra ffmpeg, quyền ghi, dung lượng, proxy, kết nối Chaturbate và tải thử playlist/segment thật để chỉ ra chính xác mắt xích bị lỗi.
 - **Điều khiển từ xa toàn diện qua Telegram Bot**:
   - Ra lệnh kiểm tra trạng thái, thêm/bớt streamer, bắt đầu hoặc dừng ghi hình trực tiếp từ tin nhắn Telegram.
 
@@ -45,8 +51,8 @@ pkg install python ffmpeg git termux-api -y
 # 3. Cấp quyền bộ nhớ thiết bị cho Termux (bấm Cho phép trên màn hình)
 termux-setup-storage
 
-# 4. Cài đặt thư viện Telethon
-pip install telethon
+# 4. Cài đặt thư viện Telethon (+ PySocks nếu dùng proxy SOCKS5)
+pip install telethon pysocks
 
 # 5. Tải mã nguồn dự án về máy
 git clone https://github.com/nghiart/cb2te.git
@@ -139,6 +145,21 @@ python3 rec2_app.py rec <username_hoặc_link>
 ```
 *Ví dụ: `python3 rec2_app.py rec sweet_girl`*
 
+### 4. Chẩn đoán khi không thấy video nào được lưu
+```bash
+python3 rec2_app.py doctor            # kiểm tra toàn bộ pipeline + 1 streamer trong favorites
+python3 rec2_app.py doctor --probe 3  # kiểm tra 3 streamer
+python3 rec2_app.py doctor sweet_girl # kiểm tra 1 streamer cụ thể
+```
+In ra bảng **PASS / WARN / FAIL** cho: ffmpeg, ffprobe, quyền ghi + dung lượng, `settings.txt`, proxy, termux-api, Telethon, history, probe Chaturbate, playlist HLS, init segment (fMP4) và tải thử segment.
+
+### 5. Đóng gói lại file thô sau khi sửa ffmpeg
+Nếu hệ thống từng giữ lại file `.ts`/`.m4s` (vì mux lỗi lúc ghi):
+```bash
+python3 rec2_app.py remux                # quét thư mục recordings/
+python3 rec2_app.py remux recordings/    # hoặc chỉ định đường dẫn
+```
+
 ---
 
 ## 💬 Danh sách câu lệnh Telegram Bot
@@ -164,7 +185,7 @@ Sau khi khởi chạy daemon `python3 rec2_app.py bot`, bạn có thể nhắn t
 Hệ thống được phát triển theo phương pháp Test-Driven Development (TDD) với độ bao phủ kiểm thử toàn diện:
 
 ```bash
-# Chạy toàn bộ 94 bài kiểm thử trong dự án
+# Chạy toàn bộ 120 bài kiểm thử trong dự án
 python3 -m unittest discover -s tests -v
 ```
 
@@ -181,13 +202,16 @@ cb2te/
 ├── core/
 │   ├── android.py           # Android wake-lock, memory trim & storage helpers
 │   ├── config.py            # Parser cấu hình settings.txt & favorites.txt
-│   ├── muxer.py             # FFmpeg stream-copy muxer (-c copy)
-│   ├── recorder.py          # Low-RAM HLS progressive stream downloader
+│   ├── doctor.py            # Chẩn đoán pipeline (PASS/WARN/FAIL) cho lệnh `doctor`
+│   ├── muxer.py             # FFmpeg stream-copy muxer (3 chiến lược + timeout)
+│   ├── net.py               # Header trình duyệt, proxy HTTP/SOCKS5, HTTP client
+│   ├── recorder.py          # HLS recorder (MPEG-TS + fMP4/CMAF), probe 3 tầng
 │   └── task_manager.py      # Bộ điều phối đa luồng & giới hạn concurrency
 ├── storage/
 │   ├── cleaner.py           # Quét dọn video sau 48h & xả khẩn cấp đĩa trống
 │   └── history.py           # Quản lý cơ sở dữ liệu lịch sử file (history.json)
-├── tests/                   # Toàn bộ test suite tự động (94 unit/e2e tests)
+├── docs/                    # Thiết kế + báo cáo phân tích sự cố
+├── tests/                   # Toàn bộ test suite tự động (120 unit/e2e tests)
 ├── rec2_app.py              # File chạy chính (CLI & Daemon 24/7)
 ├── settings.example.txt     # File cấu hình mẫu
 ├── favorites.example.txt    # Danh sách streamer mẫu
@@ -202,3 +226,24 @@ cb2te/
   ```bash
   export RECORDINGS_DIR="/sdcard/Movies/Recordings"
   ```
+- Nếu thư mục tạm (`$TMPDIR`) và `RECORDINGS_DIR` khác ổ đĩa, hệ thống vẫn an toàn (dùng copy+unlink thay vì `rename`).
+- **Chaturbate chặn theo IP (geo-block)**: nếu `doctor` báo `geo_blocked` hoặc `HLS ... HTTP 403`, hãy đặt `PROXY` trong `settings.txt`:
+  ```ini
+  PROXY = socks5://user:pass@host:1080   # cần: pip install pysocks
+  # hoặc
+  PROXY = http://user:pass@host:8080
+  ```
+
+---
+
+## 🔧 Khắc phục sự cố
+
+Xem báo cáo phân tích đầy đủ: [docs/2026-11-10-live-stream-not-saved-diagnosis.md](docs/2026-11-10-live-stream-not-saved-diagnosis.md)
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+| :--- | :--- | :--- |
+| Không có video nào, log im lặng | thiếu ffmpeg / API bị chặn / geo-block | `python3 rec2_app.py doctor` |
+| Có file `.ts`/`.m4s` nhưng không có `.mp4` | ffmpeg lỗi hoặc chưa cài | `pkg install ffmpeg` rồi `python3 rec2_app.py remux` |
+| Phòng `public` nhưng báo offline | IP bị giới hạn CDN | đặt `PROXY` (ưu tiên cùng quốc gia) |
+| Dừng bằng `Ctrl+C` bị mất video | mux chưa xong | bản mới đã chờ tới 120 s; đợi thêm vài giây |
+| Proxy SOCKS5 không hoạt động | thiếu PySocks | `pip install pysocks` |

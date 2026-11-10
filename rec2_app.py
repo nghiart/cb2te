@@ -31,7 +31,11 @@ from core.config import (
     load_favorites,
     normalize_room_id,
 )
-from core.recorder import StreamInfo, probe_room, record_stream_to_disk
+from core.recorder import (
+    MIN_VALID_STREAM_BYTES,
+    probe_room,
+    record_stream_to_disk,
+)
 from core.task_manager import JobStatus, TaskManager
 from storage.cleaner import RetentionCleaner
 from storage.history import HistoryStore
@@ -86,6 +90,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Room username or URL to record",
     )
 
+    # Subcommand: doctor
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Diagnose why streams are not being saved (ffmpeg/probe/HLS/disk)"
+    )
+    doctor_parser.add_argument(
+        "--probe",
+        type=int,
+        default=1,
+        help="Number of favorites to probe end-to-end (default: 1, 0 = no network)",
+    )
+    doctor_parser.add_argument(
+        "rooms",
+        nargs="*",
+        help="Extra room usernames to probe (optional)",
+    )
+
+    # Subcommand: remux
+    remux_parser = subparsers.add_parser(
+        "remux", help="Remux leftover .ts/.m4s spools into .mp4 (after fixing ffmpeg)"
+    )
+    remux_parser.add_argument("paths", nargs="*", help="Files or directories (default: recordings dir)")
+
     return parser
 
 
@@ -127,12 +153,14 @@ def run_rec_cmd(cfg: Config, recordings_dir: Path, target_rooms: list[str]) -> i
     print(f"🔍 Probing streamer '{room}'...")
     info = probe_room(room, proxy=cfg.proxy)
     if not info.is_live or not info.hls_url:
-        print(f"ℹ️ Streamer '{room}' is currently OFFLINE or private.")
+        detail = info.error or "offline"
+        print(f"ℹ️ Streamer '{room}' không ghi được — status={info.room_status or 'offline'} ({detail})")
+        if info.room_status in ("geo_blocked", "error"):
+            print("   ↳ Chạy 'python3 rec2_app.py doctor' và kiểm tra PROXY trong settings.txt")
         return 0
 
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_mp4 = recordings_dir / f"chaturbate_{room}_{now_str}.mp4"
-    stop_event = asyncio.Event() if False else None
 
     import threading
     th_stop = threading.Event()
@@ -150,6 +178,8 @@ def run_rec_cmd(cfg: Config, recordings_dir: Path, target_rooms: list[str]) -> i
         out_mp4=out_mp4,
         stop_event=th_stop,
         proxy=cfg.proxy,
+        reprobe_fn=lambda: probe_room(room, proxy=cfg.proxy),
+        min_valid_bytes=MIN_VALID_STREAM_BYTES,
         on_progress=lambda b, el: sys.stdout.write(
             f"\rRecorded: {b / (1024 * 1024):.1f} MB | Elapsed: {int(el)}s"
         ),
@@ -161,6 +191,71 @@ def run_rec_cmd(cfg: Config, recordings_dir: Path, target_rooms: list[str]) -> i
     else:
         print("⚠️ No video data saved.")
         return 1
+
+
+def run_doctor_cmd(
+    cfg: Config,
+    settings_path: Path,
+    recordings_dir: Path,
+    fav_path: Path,
+    probe_limit: int,
+    rooms: list[str],
+) -> int:
+    """Run the full diagnostic suite (the answer to 'why is nothing saved?')."""
+    from core.doctor import FAIL, format_report, run_doctor
+
+    checks = run_doctor(
+        cfg,
+        settings_path,
+        recordings_dir,
+        fav_path,
+        probe_limit=probe_limit,
+        extra_rooms=rooms,
+    )
+    print(format_report(checks))
+    return 1 if any(c.status == FAIL for c in checks) else 0
+
+
+def run_remux_cmd(recordings_dir: Path, targets: list[str]) -> int:
+    """Remux leftover raw spools (``.ts`` / ``.m4s``) once ffmpeg works again."""
+    from core.muxer import mux_stream_copy
+
+    roots = [Path(t) for t in targets] if targets else [recordings_dir]
+    spools: list[Path] = []
+    for root in roots:
+        if root.is_dir():
+            spools.extend(sorted(root.glob("*.ts")))
+            spools.extend(sorted(root.glob("*.m4s")))
+        elif root.is_file():
+            spools.append(root)
+
+    if not spools:
+        print(f"Không tìm thấy file .ts/.m4s nào trong {[str(r) for r in roots]}")
+        return 0
+
+    failures = 0
+    for spool in spools:
+        out = spool.with_suffix(".mp4")
+        if out.exists() and out.stat().st_size > 0:
+            print(f"⏭  Bỏ qua (đã có MP4): {out.name}")
+            continue
+        is_fmp4 = spool.suffix.lower() == ".m4s"
+        ok, err = mux_stream_copy(
+            spool,
+            out,
+            input_format="mov" if is_fmp4 else "mpegts",
+        )
+        if ok:
+            size_mb = out.stat().st_size / (1024 * 1024)
+            print(f"✅ {spool.name} -> {out.name} ({size_mb:.1f} MB)")
+            try:
+                spool.unlink()
+            except OSError:
+                pass
+        else:
+            failures += 1
+            print(f"❌ {spool.name}: {err}")
+    return 1 if failures else 0
 
 
 async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_path: Path) -> None:
@@ -262,7 +357,9 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
                 clean_timer -= 1
     finally:
         logger.info("Cleaning up daemon resources...")
-        task_manager.stop_all(wait=True, timeout=3.0)
+        # Muxing a multi-GB file on a phone can take minutes: wait for it,
+        # otherwise a Ctrl+C silently destroys the session being finalized.
+        task_manager.stop_all(wait=True, timeout=120.0)
         await upload_queue.stop_worker()
         if client and hasattr(client, "disconnect"):
             try:
@@ -300,6 +397,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.cmd == "rec":
         return run_rec_cmd(cfg, recordings_dir, args.target)
+
+    if args.cmd == "doctor":
+        return run_doctor_cmd(
+            cfg,
+            settings_path,
+            recordings_dir,
+            fav_path,
+            probe_limit=args.probe,
+            rooms=list(args.rooms or []),
+        )
+
+    if args.cmd == "remux":
+        return run_remux_cmd(recordings_dir, list(args.paths or []))
 
     if args.cmd == "bot":
         try:

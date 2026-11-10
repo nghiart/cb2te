@@ -17,7 +17,12 @@ from typing import Callable, Optional
 
 from core.android import get_recordings_dir, release_os_memory
 from core.config import normalize_room_id
-from core.recorder import StreamInfo, probe_room, record_stream_to_disk
+from core.recorder import (
+    MIN_VALID_STREAM_BYTES,
+    StreamInfo,
+    probe_room,
+    record_stream_to_disk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +228,18 @@ class TaskManager:
                                 )
                                 job.thread = t
                                 t.start()
+                elif info is not None and not info.is_live:
+                    # Surface *why* a room is not being recorded (geo block, WAF,
+                    # private show...). Silently treating every failure as
+                    # "offline" is what made the old daemon record nothing.
+                    if info.room_status in ("error", "geo_blocked"):
+                        job.error_message = info.error or info.room_status
+                        logger.warning(
+                            "Room %s not recordable [%s]: %s",
+                            job.room_id, info.room_status, info.error,
+                        )
+                    else:
+                        job.error_message = ""
 
                 if i < len(candidates) - 1 and stagger_seconds > 0:
                     time.sleep(stagger_seconds)
@@ -236,6 +253,13 @@ class TaskManager:
         started_mono = time.monotonic()
         result_mp4: Optional[Path] = None
 
+        def _reprobe() -> Optional[StreamInfo]:
+            """Refresh the room's HLS URL when the playlist token expires."""
+            fresh = probe_room(job.room_id, proxy=self.proxy)
+            if fresh.is_live and fresh.hls_url:
+                return fresh
+            return None
+
         try:
             def on_progress(bytes_written: int, _elapsed: float) -> None:
                 job.bytes_recorded = bytes_written
@@ -247,6 +271,8 @@ class TaskManager:
                 max_bytes=self.max_bytes,
                 on_progress=on_progress,
                 proxy=self.proxy,
+                reprobe_fn=_reprobe,
+                min_valid_bytes=MIN_VALID_STREAM_BYTES,
             )
         except Exception as e:
             logger.exception("Recording failed for room %s: %s", job.room_id, e)
@@ -264,6 +290,11 @@ class TaskManager:
                 job.current_file = None
 
             if result_mp4 and result_mp4.exists() and result_mp4.stat().st_size > 0:
+                if result_mp4.suffix.lower() not in (".mp4", ".mkv"):
+                    logger.warning(
+                        "Room %s: saved RAW %s (mux failed) - it will still be uploaded",
+                        job.room_id, result_mp4.name,
+                    )
                 if self._on_file_ready:
                     try:
                         self._on_file_ready(result_mp4, job.room_id, duration_sec)
@@ -273,10 +304,17 @@ class TaskManager:
                             job.room_id,
                             e,
                         )
+            else:
+                logger.warning(
+                    "Room %s: recording finished without a saved file "
+                    "(duration=%.0fs, bytes=%d, error=%s)",
+                    job.room_id, duration_sec, job.bytes_recorded,
+                    job.error_message or "none",
+                )
 
             release_os_memory()
 
-    def stop_all(self, wait: bool = False, timeout: float = 5.0) -> None:
+    def stop_all(self, wait: bool = False, timeout: float = 60.0) -> None:
         """Signal all active/tracked jobs to stop, optionally waiting for worker threads."""
         with self._lock:
             jobs = list(self._jobs.values())

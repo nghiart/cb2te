@@ -211,13 +211,29 @@ class UploadQueue:
             f"⏳ Lưu trữ máy: 48 giờ trước khi xóa tự động."
         )
 
-        # 4. Stream upload via send_file
-        await client.send_file(
-            chat_id,
-            file=item.file_path,
-            caption=caption,
-            progress_callback=progress_callback,
-        )
+        # 4. Stream upload via send_file.  Raw `.ts`/`.m4s` spools (mux failed on
+        # the device) are sent as documents so the footage is never lost.
+        suffix = item.file_path.suffix.lower()
+        is_video = suffix in (".mp4", ".mkv", ".mov", ".webm")
+        try:
+            await client.send_file(
+                chat_id,
+                file=item.file_path,
+                caption=caption,
+                progress_callback=progress_callback,
+                force_document=not is_video,
+            )
+        except Exception:
+            if is_video:
+                raise
+            logger.warning("Document upload failed for %s, retrying as plain document",
+                           item.file_path.name)
+            await client.send_file(
+                chat_id,
+                file=item.file_path,
+                caption=caption + "\n⚠️ RAW spool (chưa remux được trên máy)",
+                force_document=True,
+            )
 
         # 5. Delete temporary progress message
         if progress_msg:

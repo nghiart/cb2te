@@ -19,8 +19,10 @@ class TestMuxer(unittest.TestCase):
 
     def test_tools_detected(self):
         ff = find_ffmpeg()
-        self.assertTrue(ff is not None and len(ff) > 0, "ffmpeg must be found in PATH or system")
         fp = find_ffprobe()
+        if ff is None or fp is None:
+            self.skipTest("ffmpeg/ffprobe not installed on this host")
+        self.assertTrue(ff is not None and len(ff) > 0, "ffmpeg must be found in PATH or system")
         self.assertTrue(fp is not None and len(fp) > 0, "ffprobe must be found in PATH or system")
 
     def test_candidate_paths_fallback(self):
@@ -118,14 +120,16 @@ class TestMuxer(unittest.TestCase):
             dummy_file.write_bytes(b"123")
             self.assertEqual(inspect_media(dummy_file), {})
 
-    def test_mux_input_not_exists(self):
+    @patch("core.muxer.find_ffmpeg", return_value="/usr/bin/ffmpeg")
+    def test_mux_input_not_exists(self, _mock_ffmpeg):
         nonexistent = self.tmp_dir / "does_not_exist.ts"
         out_mp4 = self.tmp_dir / "out.mp4"
         ok, err = mux_stream_copy(nonexistent, out_mp4)
         self.assertFalse(ok)
         self.assertIn("Input file does not exist", err)
 
-    def test_mux_mkdir_failure(self):
+    @patch("core.muxer.find_ffmpeg", return_value="/usr/bin/ffmpeg")
+    def test_mux_mkdir_failure(self, _mock_ffmpeg):
         sample = self.tmp_dir / "input.ts"
         sample.write_bytes(b"dummy")
         # Target path inside a file rather than directory to cause OSError in mkdir
@@ -137,7 +141,8 @@ class TestMuxer(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Failed to create output directory", err)
 
-    def test_mux_subprocess_exception(self):
+    @patch("core.muxer.find_ffmpeg", return_value="/usr/bin/ffmpeg")
+    def test_mux_subprocess_exception(self, _mock_ffmpeg):
         sample = self.tmp_dir / "input.ts"
         sample.write_bytes(b"dummy")
         out_mp4 = self.tmp_dir / "out.mp4"
@@ -147,13 +152,15 @@ class TestMuxer(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("Failed to run ffmpeg", err)
 
-    def test_mux_success_code_but_empty_output(self):
+    @patch("core.muxer.find_ffmpeg", return_value="/usr/bin/ffmpeg")
+    def test_mux_success_code_but_empty_output(self, _mock_ffmpeg):
         sample = self.tmp_dir / "input.ts"
         sample.write_bytes(b"dummy")
         out_mp4 = self.tmp_dir / "out.mp4"
 
         mock_proc = unittest.mock.MagicMock()
         mock_proc.returncode = 0
+        mock_proc.stderr = ""
         with patch("core.muxer.subprocess.run", return_value=mock_proc):
             # Output file is not created or is empty
             ok, err = mux_stream_copy(sample, out_mp4)
