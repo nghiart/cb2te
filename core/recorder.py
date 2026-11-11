@@ -105,11 +105,17 @@ class StreamInfo:
     height: int = 0
     room_status: str = ""
     error: str = ""
+    resolution_label: str = ""
+
+    def __post_init__(self):
+        if not self.resolution_label and self.height > 0:
+            self.resolution_label = f"{self.height}p"
 
     def __str__(self) -> str:  # pragma: no cover - debug helper
+        res = f", res={self.resolution_label!r}" if self.resolution_label else ""
         return (
             f"StreamInfo(room={self.room_id!r}, live={self.is_live}, "
-            f"status={self.room_status!r}, hls={self.hls_url!r}, err={self.error!r})"
+            f"status={self.room_status!r}, hls={self.hls_url!r}, err={self.error!r}{res})"
         )
 
 
@@ -466,6 +472,14 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
             hls_url = _prefer_ts_playlist(hls_url, user, proxy)
         width = _int_or_zero(payload.get("width") if isinstance(payload, dict) else 0)
         height = _int_or_zero(payload.get("height") if isinstance(payload, dict) else 0)
+
+        res_label = f"{height}p" if height > 0 else ""
+        if not res_label and hls_url:
+            # Check if variant has clues in URL like chunklist_720p or similar
+            m_res = re.search(r"(\d{3,4})p", hls_url, re.I)
+            if m_res:
+                res_label = f"{m_res.group(1)}p"
+
         return StreamInfo(
             room_id=user,
             is_live=True,
@@ -473,6 +487,7 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
             width=width,
             height=height,
             room_status=status or "public",
+            resolution_label=res_label,
         )
 
     if status in _BLOCKED_STATUSES:

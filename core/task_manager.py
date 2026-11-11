@@ -1,7 +1,8 @@
 """In-Memory TaskManager & Concurrency Governance Engine.
 
 Governs concurrent Chaturbate stream recording jobs, enforcing concurrency limits,
-staggered probe intervals, and asynchronous recording thread dispatch on Android Termux.
+staggered probe intervals, periodic 5-minute status monitoring, and asynchronous
+recording thread dispatch on Android Termux.
 """
 
 from __future__ import annotations
@@ -53,10 +54,13 @@ class RecordingJob:
     started_at: float = 0.0
     last_poll: float = 0.0
     error_message: str = ""
+    last_detected_status: str = "unknown"
+    last_detected_resolution: str = ""
+    last_status_checked_at: float = 0.0
 
 
 class TaskManager:
-    """Manages recording jobs, concurrency limits, and staggered polling."""
+    """Manages recording jobs, concurrency limits, staggered polling, and status change tracking."""
 
     def __init__(
         self,
@@ -83,6 +87,7 @@ class TaskManager:
         self._lock = threading.RLock()
         self._polling_lock = threading.Lock()
         self._on_file_ready: Optional[Callable[[Path, str, float], None]] = None
+        self._on_status_change: Optional[Callable[[str, str, str, StreamInfo], None]] = None
 
     def start_tracking(self, room_id: str) -> bool:
         """Start tracking a room. Returns True if newly added or reactivated, False otherwise."""
@@ -152,6 +157,59 @@ class TaskManager:
         with self._lock:
             self._on_file_ready = cb
 
+    def set_on_status_change_callback(
+        self, cb: Callable[[str, str, str, StreamInfo], None]
+    ) -> None:
+        """Set callback invoked as cb(room_id, old_status, new_status, info) when a room changes status."""
+        with self._lock:
+            self._on_status_change = cb
+
+    def check_all_room_statuses(self) -> list[tuple[str, StreamInfo, bool]]:
+        """Probe all tracked rooms and fire on_status_change if changed.
+
+        Returns: list of (room_id, stream_info, has_changed).
+        """
+        with self._lock:
+            tracked_rooms = list(self._jobs.keys())
+
+        results = []
+        for room in tracked_rooms:
+            try:
+                info = probe_room(room, proxy=self.proxy)
+            except Exception as e:
+                info = StreamInfo(room_id=room, is_live=False, room_status="error", error=str(e))
+
+            status_str = "online" if info.is_live else (info.room_status or "offline")
+            res_str = info.resolution_label
+
+            changed = False
+            old_full = "unknown"
+            with self._lock:
+                job = self._jobs.get(room)
+                if job:
+                    old_status = job.last_detected_status
+                    old_res = job.last_detected_resolution
+                    old_full = f"{old_status} ({old_res})" if (old_status == "online" and old_res) else old_status
+
+                    new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
+
+                    if old_status != "unknown" and old_full != new_full:
+                        changed = True
+
+                    job.last_detected_status = status_str
+                    job.last_detected_resolution = res_str
+                    job.last_status_checked_at = time.time()
+
+            if changed and self._on_status_change:
+                try:
+                    new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
+                    self._on_status_change(room, old_full, new_full, info)
+                except Exception as e:
+                    logger.warning("Error in on_status_change for %s: %s", room, e)
+
+            results.append((room, info, changed))
+        return results
+
     def poll_staggered_batch(self, stagger_seconds: float = 0.3) -> None:
         """Probe standby rooms with staggered timing and dispatch recording if live."""
         if not self._polling_lock.acquire(blocking=False):
@@ -197,6 +255,25 @@ class TaskManager:
                     job.error_message = str(e)
                     info = None
 
+                if info:
+                    # Update status detection & check change
+                    status_str = "online" if info.is_live else (info.room_status or "offline")
+                    res_str = info.resolution_label
+                    old_status = job.last_detected_status
+                    old_res = job.last_detected_resolution
+                    old_full = f"{old_status} ({old_res})" if (old_status == "online" and old_res) else old_status
+                    new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
+
+                    if old_status != "unknown" and old_full != new_full and self._on_status_change:
+                        try:
+                            self._on_status_change(job.room_id, old_full, new_full, info)
+                        except Exception as e:
+                            logger.warning("Error in on_status_change: %s", e)
+
+                    job.last_detected_status = status_str
+                    job.last_detected_resolution = res_str
+                    job.last_status_checked_at = time.time()
+
                 if info and info.is_live and info.hls_url:
                     with self._lock:
                         if (
@@ -225,13 +302,15 @@ class TaskManager:
                                     args=(job, info, out_path),
                                     name=f"rec-{job.room_id}",
                                     daemon=True,
+                                raid=False) if hasattr(threading.Thread, "raid") else threading.Thread(
+                                    target=self._record_worker,
+                                    args=(job, info, out_path),
+                                    name=f"rec-{job.room_id}",
+                                    daemon=True,
                                 )
                                 job.thread = t
                                 t.start()
                 elif info is not None and not info.is_live:
-                    # Surface *why* a room is not being recorded (geo block, WAF,
-                    # private show...). Silently treating every failure as
-                    # "offline" is what made the old daemon record nothing.
                     if info.room_status in ("error", "geo_blocked"):
                         job.error_message = info.error or info.room_status
                         logger.warning(

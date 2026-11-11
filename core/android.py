@@ -86,14 +86,45 @@ def get_safe_tmp_dir() -> Path:
 
 
 def get_recordings_dir() -> Path:
-    """Return the output directory for finalized recordings."""
+    """Return the output directory for finalized recordings.
+
+    Priority:
+    1. RECORDINGS_DIR environment variable if specified.
+    2. ~/storage/downloads/CB2TE (Android Termux downloads symlink) if storage is accessible.
+    3. ~/storage/shared/Download/CB2TE if shared storage is accessible.
+    4. ./recordings (local project workspace fallback).
+    """
     env_path = os.environ.get("RECORDINGS_DIR")
     if env_path:
         rec_dir = Path(env_path)
-    else:
-        rec_dir = Path.cwd() / "recordings"
+        try:
+            rec_dir.mkdir(parents=True, exist_ok=True)
+            return rec_dir.resolve()
+        except OSError:
+            pass
 
-    rec_dir.mkdir(parents=True, exist_ok=True)
+    home = Path.home()
+    android_candidates = [
+        home / "storage" / "downloads" / "CB2TE",
+        home / "storage" / "downloads",
+        home / "storage" / "shared" / "Download" / "CB2TE",
+    ]
+
+    for cand in android_candidates:
+        try:
+            # Check if parent or storage symlink exists
+            if cand.parent.exists():
+                cand.mkdir(parents=True, exist_ok=True)
+                if cand.is_dir() and os.access(cand, os.W_OK):
+                    return cand.resolve()
+        except OSError:
+            continue
+
+    rec_dir = Path.cwd() / "recordings"
+    try:
+        rec_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return rec_dir.resolve()
 
 

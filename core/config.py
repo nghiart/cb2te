@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -34,6 +35,11 @@ class Config:
     max_concurrent: int = 2
     min_free_mb: int = 400
     proxy: str = ""
+    monitor_interval_sec: int = 300  # Default 5 minutes periodic check
+    notify_on_status_change: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def normalize_room_id(text: str) -> str:
@@ -53,14 +59,64 @@ def normalize_room_id(text: str) -> str:
 
 def load_config(path: Path) -> Config:
     cfg = Config()
-    if not path.exists():
+    target_path = Path(path)
+
+    # Fallback to .txt if .json does not exist
+    if not target_path.exists():
+        if target_path.suffix == ".json":
+            txt_alt = target_path.with_suffix(".txt")
+            if txt_alt.exists():
+                return load_config(txt_alt)
+        elif target_path.suffix == ".txt":
+            json_alt = target_path.with_suffix(".json")
+            if json_alt.exists():
+                return load_config(json_alt)
         return cfg
 
     try:
-        content = path.read_text(encoding="utf-8")
+        content = target_path.read_text(encoding="utf-8").strip()
     except OSError:
         return cfg
 
+    if not content:
+        return cfg
+
+    # 1. Try parsing JSON format
+    if target_path.suffix == ".json" or content.startswith("{"):
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                if "api_id" in data:
+                    cfg.api_id = int(data["api_id"])
+                if "api_hash" in data:
+                    cfg.api_hash = str(data["api_hash"])
+                if "bot_token" in data:
+                    cfg.bot_token = str(data["bot_token"])
+                if "chat_id" in data:
+                    cfg.chat_id = int(data["chat_id"])
+                if "admin_ids" in data:
+                    raw_admins = data["admin_ids"]
+                    if isinstance(raw_admins, list):
+                        cfg.admin_ids = [int(x) for x in raw_admins if str(x).isdigit() or isinstance(x, int)]
+                    elif isinstance(raw_admins, (int, str)):
+                        cfg.admin_ids = [int(x) for x in str(raw_admins).replace(",", " ").split() if x.isdigit()]
+                if "retention_hours" in data:
+                    cfg.retention_hours = int(data["retention_hours"])
+                if "max_concurrent" in data:
+                    cfg.max_concurrent = int(data["max_concurrent"])
+                if "min_free_mb" in data:
+                    cfg.min_free_mb = int(data["min_free_mb"])
+                if "proxy" in data:
+                    cfg.proxy = str(data["proxy"] or "").strip()
+                if "monitor_interval_sec" in data:
+                    cfg.monitor_interval_sec = int(data["monitor_interval_sec"])
+                if "notify_on_status_change" in data:
+                    cfg.notify_on_status_change = bool(data["notify_on_status_change"])
+                return cfg
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Key-value line based parsing (.txt format fallback)
     for raw in content.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -112,19 +168,105 @@ def load_config(path: Path) -> Config:
                 pass
         elif k == "proxy":
             cfg.proxy = v.strip('"\'')
+        elif k in ("monitor_interval_sec", "monitor_interval"):
+            try:
+                cfg.monitor_interval_sec = int(v.split("#")[0].strip())
+            except ValueError:
+                pass
+        elif k == "notify_on_status_change":
+            cfg.notify_on_status_change = v.split("#")[0].strip().lower() in ("1", "true", "yes")
 
     return cfg
 
 
+def save_config(cfg: Config, path: Path) -> None:
+    """Save configuration to JSON file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".json":
+        path.write_text(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        # Save as traditional key-value
+        lines = [
+            f"API_ID = {cfg.api_id}",
+            f'API_HASH = "{cfg.api_hash}"',
+            f'BOT_TOKEN = "{cfg.bot_token}"',
+            f"CHAT_ID = {cfg.chat_id}",
+            f"ADMIN_IDS = {', '.join(str(x) for x in cfg.admin_ids)}",
+            f"RETENTION_HOURS = {cfg.retention_hours}",
+            f"MAX_CONCURRENT = {cfg.max_concurrent}",
+            f"MIN_FREE_MB = {cfg.min_free_mb}",
+            f'PROXY = "{cfg.proxy}"',
+            f"MONITOR_INTERVAL_SEC = {cfg.monitor_interval_sec}",
+            f"NOTIFY_ON_STATUS_CHANGE = {1 if cfg.notify_on_status_change else 0}",
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def load_favorites(path: Path, include_disabled: bool = False) -> list[dict]:
-    if not path.exists():
+    target_path = Path(path)
+
+    # Fallback between json and txt
+    if not target_path.exists():
+        if target_path.suffix == ".json":
+            txt_alt = target_path.with_suffix(".txt")
+            if txt_alt.exists():
+                return load_favorites(txt_alt, include_disabled=include_disabled)
+        elif target_path.suffix == ".txt":
+            json_alt = target_path.with_suffix(".json")
+            if json_alt.exists():
+                return load_favorites(json_alt, include_disabled=include_disabled)
         return []
 
     try:
-        content = path.read_text(encoding="utf-8")
+        content = target_path.read_text(encoding="utf-8").strip()
     except OSError:
         return []
 
+    if not content:
+        return []
+
+    # 1. JSON parsing
+    if target_path.suffix == ".json" or content.startswith("[") or content.startswith("{"):
+        try:
+            data = json.loads(content)
+            raw_list = data.get("favorites", []) if isinstance(data, dict) else data
+            if isinstance(raw_list, list):
+                out: list[dict] = []
+                seen: set[str] = set()
+                for it in raw_list:
+                    if isinstance(it, str):
+                        rid = normalize_room_id(it)
+                        if rid and rid not in seen:
+                            seen.add(rid)
+                            out.append({
+                                "platform": "chaturbate",
+                                "room_id": rid,
+                                "note": "",
+                                "nick": "",
+                                "enabled": True,
+                            })
+                    elif isinstance(it, dict):
+                        rid = normalize_room_id(it.get("room_id") or it.get("user") or "")
+                        if not rid or rid in seen:
+                            continue
+                        en = bool(it.get("enabled", True))
+                        if not en and not include_disabled:
+                            continue
+                        seen.add(rid)
+                        note = str(it.get("note") or it.get("nick") or "").strip()
+                        out.append({
+                            "platform": it.get("platform", "chaturbate"),
+                            "room_id": rid,
+                            "note": note,
+                            "nick": note,
+                            "enabled": en,
+                        })
+                return out
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Text parsing (.txt fallback)
     out: list[dict] = []
     seen: set[str] = set()
     for raw in content.lstrip("\ufeff").splitlines():
@@ -166,6 +308,27 @@ def load_favorites(path: Path, include_disabled: bool = False) -> list[dict]:
 
 
 def save_favorites(items: list[dict], path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.suffix == ".json":
+        clean_items = []
+        seen: set[str] = set()
+        for it in items:
+            rid = normalize_room_id(it.get("room_id") or "")
+            if not rid or rid in seen:
+                continue
+            seen.add(rid)
+            clean_items.append({
+                "platform": it.get("platform", "chaturbate"),
+                "room_id": rid,
+                "note": str(it.get("note") or it.get("nick") or "").strip(),
+                "enabled": bool(it.get("enabled", True)),
+            })
+        path.write_text(json.dumps({"favorites": clean_items}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return
+
+    # Text format
     lines = [
         "# Chaturbate favorites",
         "# One username per line. An optional note (streamer name) may follow.",
@@ -184,8 +347,6 @@ def save_favorites(items: list[dict], path: Path) -> None:
         suffix = f"  {note}" if note else ""
         lines.append(f"{prefix}{rid}{suffix}")
     lines.append("")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -193,7 +354,8 @@ def add_favorite(room_id: str, note: str, path: Path) -> bool:
     rid = normalize_room_id(room_id)
     if not rid:
         return False
-    items = load_favorites(path, include_disabled=True) if path.exists() else []
+    path = Path(path)
+    items = load_favorites(path, include_disabled=True) if (path.exists() or path.with_suffix(".txt").exists() or path.with_suffix(".json").exists()) else []
     for it in items:
         if it["room_id"] == rid:
             it["note"] = note.strip()
@@ -214,7 +376,8 @@ def add_favorite(room_id: str, note: str, path: Path) -> bool:
 
 def remove_favorite(room_id: str, path: Path) -> bool:
     rid = normalize_room_id(room_id)
-    if not rid or not path.exists():
+    path = Path(path)
+    if not rid:
         return False
     items = load_favorites(path, include_disabled=True)
     orig_len = len(items)

@@ -17,6 +17,7 @@ from core.config import (
     normalize_room_id,
     remove_favorite,
 )
+from core.recorder import probe_room
 from core.task_manager import JobStatus, TaskManager
 from storage.history import HistoryRecord, HistoryStore
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "is_authorized",
     "format_status_message",
+    "format_room_status_message",
     "format_help_message",
     "format_files_message",
     "register_handlers",
@@ -57,7 +59,9 @@ def format_status_message(
             room = job.get("room_id", "unknown")
             st = job.get("status", "RECORDING")
             size = job.get("size_mb", 0)
-            lines.append(f"  • `{room}` - {st} ({size} MB)")
+            res = job.get("resolution", "")
+            res_str = f" [{res}]" if res else ""
+            lines.append(f"  • `{room}`{res_str} - {st} ({size} MB)")
     else:
         lines.append("  *(Không có phòng nào đang ghi)*")
 
@@ -77,15 +81,55 @@ def format_status_message(
     return "\n".join(lines)
 
 
+def format_room_status_message(room: str, job: Any, info: Any, files: list[HistoryRecord]) -> str:
+    """Format detailed status for an individual room."""
+    lines = [
+        f"🔍 **CHI TIẾT ROOM: #{room}**",
+        "──────────────────────────────",
+    ]
+    if info:
+        is_live = info.is_live
+        status_label = "🟢 ONLINE" if is_live else f"⚪ {info.room_status.upper() or 'OFFLINE'}"
+        res_label = info.resolution_label or (f"{info.height}p" if info.height > 0 else "Unknown")
+        lines.append(f"• **Trạng thái Stream:** {status_label}")
+        if is_live:
+            lines.append(f"• **Độ phân giải:** `{res_label}` ({info.width}x{info.height})")
+            if info.hls_url:
+                lines.append(f"• **HLS URL:** `{info.hls_url[:60]}...`")
+        elif info.error:
+            lines.append(f"• **Ghi chú lỗi:** `{info.error}`")
+
+    if job:
+        lines.append(f"• **Tiến trình hiện tại:** `{job.status.value}`")
+        if job.status == JobStatus.RECORDING:
+            dur = int(time.time() - job.started_at) if job.started_at else 0
+            lines.append(f"• **Đã ghi:** `{job.bytes_recorded / (1024*1024):.1f} MB` ({dur}s)")
+            if job.current_file:
+                lines.append(f"• **File tạm:** `{job.current_file.name}`")
+    else:
+        lines.append("• **Theo dõi tự động:** `Chưa kích hoạt`")
+
+    # Files for this room
+    room_files = [f for f in files if f.room_id.lower() == room.lower()]
+    lines.append(f"\n📦 **Video đã tải lên ({len(room_files)}):**")
+    for rf in room_files[-3:]:
+        sz = rf.size / (1024 * 1024)
+        fn = Path(rf.file_path).name
+        lines.append(f"  • `{fn}` ({sz:.1f} MB)")
+
+    return "\n".join(lines)
+
+
 def format_help_message() -> str:
     """Return command usage manual."""
     return (
         "🤖 **DANH SÁCH LỆNH ĐIỀU KHIỂN BOT**\n"
         "──────────────────────────────\n"
-        "• `/status` - Xem trạng thái hệ thống, RAM, ổ đĩa & upload\n"
-        "• `/rec <user>` - Bắt đầu theo dõi và ghi hình một streamer\n"
+        "• `/status [user]` - Xem trạng thái hệ thống hoặc chi tiết phòng (1080p, 720p, v.v.)\n"
+        "• `/rec <user>` - Bắt đầu theo dõi và ghi hình một streamer ngay\n"
         "• `/stop <user|all>` - Dừng ghi hình một hoặc tất cả streamer\n"
-        "• `/fav` - Xem danh sách streamer trong `favorites.txt`\n"
+        "• `/upload <user|file>` - Tải lên file video còn tồn của phòng\n"
+        "• `/fav` - Xem danh sách streamer trong `favorites.json`\n"
         "• `/add <user>` - Thêm streamer vào danh sách theo dõi\n"
         "• `/del <user>` - Xóa streamer khỏi danh sách theo dõi\n"
         "• `/files` - Xem danh sách video đã ghi trong 48h qua\n"
@@ -129,7 +173,7 @@ def register_handlers(
     favorites_path: Optional[Path | str] = None,
 ) -> dict[str, Callable]:
     """Register all bot command handlers and return dispatch mapping."""
-    fav_file = Path(favorites_path) if favorites_path else Path("favorites.txt")
+    fav_file = Path(favorites_path) if favorites_path else Path("favorites.json")
 
     async def handle_start(event: Any) -> None:
         if not is_authorized(event.sender_id, config.admin_ids):
@@ -145,11 +189,26 @@ def register_handlers(
         if not is_authorized(event.sender_id, config.admin_ids):
             return
 
+        parts = (event.raw_text or "").strip().split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            # Detailed status for specific room
+            room = normalize_room_id(parts[1])
+            job = task_manager.get_job(room)
+            try:
+                info = probe_room(room, proxy=config.proxy)
+            except Exception as e:
+                info = None
+            records = history_store.list_records(active_only=False)
+            text = format_room_status_message(room, job, info, records)
+            await event.reply(text)
+            return
+
         active_jobs = [
             {
                 "room_id": j.room_id,
                 "status": j.status.value,
                 "size_mb": round(j.bytes_recorded / (1024 * 1024), 1),
+                "resolution": j.last_detected_resolution,
             }
             for j in task_manager.get_active_jobs()
         ]
@@ -207,18 +266,55 @@ def register_handlers(
         else:
             await event.reply(f"⚠️ Phòng `{room}` không có trong danh sách đang theo dõi.")
 
+    async def handle_upload(event: Any) -> None:
+        if not is_authorized(event.sender_id, config.admin_ids):
+            return
+
+        parts = (event.raw_text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await event.reply("⚠️ Sử dụng: `/upload <username hoặc tên file>`")
+            return
+
+        target = parts[1].strip()
+        room = normalize_room_id(target)
+
+        # Look for matching mp4 files in recordings_dir
+        rec_dir = Path(task_manager.recordings_dir)
+        matched = []
+        if rec_dir.exists():
+            for f in rec_dir.glob("*.mp4"):
+                if room and room in f.name.lower():
+                    matched.append(f)
+                elif target.lower() in f.name.lower():
+                    matched.append(f)
+
+        if not matched:
+            await event.reply(f"⚠️ Không tìm thấy file video nào phù hợp với `{target}` trong `{rec_dir}`.")
+            return
+
+        from bot.uploader import UploadItem
+        enqueued_names = []
+        for mf in matched:
+            item = UploadItem(file_path=mf, room_id=room or "manual")
+            upload_queue.enqueue(item)
+            enqueued_names.append(mf.name)
+
+        await event.reply(f"📤 Đã đưa vào hàng đợi upload {len(matched)} file:\n• " + "\n• ".join(enqueued_names))
+
     async def handle_fav(event: Any) -> None:
         if not is_authorized(event.sender_id, config.admin_ids):
             return
 
         favs = load_favorites(fav_file)
         if not favs:
-            await event.reply("📋 Danh sách `favorites.txt` đang trống.")
+            await event.reply(f"📋 Danh sách `{fav_file.name}` đang trống.")
             return
 
         lines = [f"📋 **DANH SÁCH FAVORITES ({len(favs)} phòng):**"]
         for f in favs:
-            lines.append(f"• `{f.get('room_id', '')}`")
+            note = f" ({f.get('note')})" if f.get("note") else ""
+            status = "🟢" if f.get("enabled", True) else "⚪"
+            lines.append(f"{status} • `{f.get('room_id', '')}`{note}")
         await event.reply("\n".join(lines))
 
     async def handle_add(event: Any) -> None:
@@ -238,9 +334,9 @@ def register_handlers(
         ok = add_favorite(room_id=room, note="", path=fav_file)
         task_manager.start_tracking(room)
         if ok:
-            await event.reply(f"✅ Đã thêm `{room}` vào `favorites.txt` và bắt đầu theo dõi.")
+            await event.reply(f"✅ Đã thêm `{room}` vào `{fav_file.name}` và bắt đầu theo dõi.")
         else:
-            await event.reply(f"ℹ️ `{room}` đã có sẵn trong `favorites.txt`.")
+            await event.reply(f"ℹ️ `{room}` đã có sẵn trong `{fav_file.name}`.")
 
     async def handle_del(event: Any) -> None:
         if not is_authorized(event.sender_id, config.admin_ids):
@@ -259,9 +355,9 @@ def register_handlers(
         ok = remove_favorite(room_id=room, path=fav_file)
         task_manager.stop_tracking(room)
         if ok:
-            await event.reply(f"🗑 Đã xóa `{room}` khỏi `favorites.txt`.")
+            await event.reply(f"🗑 Đã xóa `{room}` khỏi `{fav_file.name}`.")
         else:
-            await event.reply(f"⚠️ `{room}` không có trong `favorites.txt`.")
+            await event.reply(f"⚠️ `{room}` không có trong `{fav_file.name}`.")
 
     async def handle_files(event: Any) -> None:
         if not is_authorized(event.sender_id, config.admin_ids):
@@ -277,6 +373,7 @@ def register_handlers(
         "/status": handle_status,
         "/rec": handle_rec,
         "/stop": handle_stop,
+        "/upload": handle_upload,
         "/fav": handle_fav,
         "/add": handle_add,
         "/del": handle_del,
