@@ -408,6 +408,34 @@ class TestTaskManager(unittest.TestCase):
 
         tm._polling_lock.release()
 
+    @patch("core.task_manager.probe_room")
+    @patch("core.task_manager.record_stream_ffmpeg")
+    def test_use_ffmpeg_recorder_flag(self, mock_ffmpeg_rec, mock_probe):
+        tm = TaskManager(
+            max_concurrent=4,
+            recordings_dir=self.rec_dir,
+            use_ffmpeg_recorder=True,
+        )
+        tm.start_tracking("streamer_ff")
+        mock_probe.return_value = StreamInfo(
+            room_id="streamer_ff",
+            is_live=True,
+            hls_url="https://live.example.com/streamer_ff.m3u8",
+        )
+        fake_file = self.rec_dir / "test.mp4"
+        fake_file.write_bytes(b"data" * 20000)
+        mock_ffmpeg_rec.return_value = fake_file
+
+        callback_called = []
+        tm.set_on_file_ready_callback(lambda p, r, d: callback_called.append((p, r)))
+
+        tm.poll_staggered_batch(stagger_seconds=0.0)
+        time.sleep(0.05)
+
+        self.assertTrue(mock_ffmpeg_rec.called)
+        self.assertEqual(len(callback_called), 1)
+        self.assertEqual(callback_called[0][1], "streamer_ff")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import threading
 import time
 import urllib.error
@@ -37,7 +38,7 @@ from typing import Callable, Optional
 
 from core.android import get_safe_tmp_dir, release_os_memory
 from core.config import normalize_room_id
-from core.muxer import mux_stream_copy
+from core.muxer import find_ffmpeg, mux_stream_copy
 from core.net import (
     NetError,
     chaturbate_headers,
@@ -60,6 +61,7 @@ __all__ = [
     "parse_target_duration",
     "select_variant",
     "record_stream_to_disk",
+    "record_stream_ffmpeg",
 ]
 
 #: A session shorter than this is considered noise and is discarded.
@@ -1049,3 +1051,161 @@ def _call_reprobe(
         logger.warning("reprobe failed: %s", exc)
         return None
     return result if isinstance(result, StreamInfo) else None
+
+
+def record_stream_ffmpeg(
+    info: StreamInfo,
+    out_mp4: Path | str,
+    stop_event: threading.Event,
+    max_duration_sec: int = 1800,
+    max_bytes: int = 1_800 * 1024 * 1024,
+    on_progress: Optional[Callable[[int, float], None]] = None,
+    proxy: str = "",
+    min_valid_bytes: int = 0,
+) -> Path | None:
+    """Record an HLS live stream directly to MP4 via ffmpeg subprocess.
+
+    Uses stream copy (-c copy) to achieve near-zero CPU and low memory footprint,
+    enabling 4-10 concurrent recordings on Android Termux.
+
+    Args:
+        info: Live StreamInfo with hls_url.
+        out_mp4: Target MP4 path.
+        stop_event: Event to signal graceful stopping.
+        max_duration_sec: Maximum duration in seconds before rotation.
+        max_bytes: Maximum file size in bytes before rotation.
+        on_progress: Progress callback(bytes_written, elapsed_seconds).
+        proxy: Optional HTTP/HTTPS proxy.
+        min_valid_bytes: Minimum bytes required to consider the recording valid.
+
+    Returns:
+        Path to the recorded MP4 file, or None if failed.
+    """
+    if not info.is_live or not info.hls_url:
+        logger.warning("record_stream_ffmpeg: stream not live or missing HLS URL")
+        return None
+
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        logger.warning("record_stream_ffmpeg: ffmpeg binary not found, falling back to python recorder")
+        return record_stream_to_disk(
+            info=info,
+            out_mp4=out_mp4,
+            stop_event=stop_event,
+            max_bytes=max_bytes,
+            on_progress=on_progress,
+            proxy=proxy,
+            min_valid_bytes=min_valid_bytes,
+        )
+
+    out_path = Path(out_mp4)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = out_path.with_name(f"{out_path.stem}.part{out_path.suffix}")
+
+    clean_room = normalize_room_id(info.room_id) or "stream"
+    user_agent = chaturbate_headers(clean_room).get(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    )
+    headers_str = (
+        f"User-Agent: {user_agent}\r\n"
+        f"Referer: https://chaturbate.com/{clean_room}/\r\n"
+        f"Origin: https://chaturbate.com\r\n"
+    )
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-nostdin",
+        "-headers", headers_str,
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+    ]
+
+    if proxy:
+        cmd.extend(["-http_proxy", proxy])
+
+    cmd.extend([
+        "-i", info.hls_url,
+        "-c", "copy",
+        "-t", str(max_duration_sec),
+        "-movflags", "+faststart",
+        str(temp_target),
+    ])
+
+    logger.info("record_stream_ffmpeg: starting recording for %s -> %s", clean_room, temp_target.name)
+    start_mono = time.monotonic()
+
+    proc: Optional[subprocess.Popen] = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        while proc.poll() is None:
+            if stop_event.is_set():
+                logger.info("record_stream_ffmpeg: stop_event set, terminating ffmpeg for %s", clean_room)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
+
+            now = time.monotonic()
+            elapsed = now - start_mono
+
+            cur_bytes = 0
+            if temp_target.exists():
+                try:
+                    cur_bytes = temp_target.stat().st_size
+                except OSError:
+                    pass
+
+            if on_progress:
+                on_progress(cur_bytes, elapsed)
+
+            if cur_bytes >= max_bytes:
+                logger.info("record_stream_ffmpeg: max_bytes reached (%d bytes), stopping %s", cur_bytes, clean_room)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
+
+            time.sleep(1.0)
+
+    except Exception as exc:
+        logger.error("record_stream_ffmpeg error for %s: %s", clean_room, exc)
+        if proc and proc.poll() is None:
+            proc.kill()
+    finally:
+        release_os_memory()
+
+    if temp_target.exists():
+        size = temp_target.stat().st_size
+        valid_floor = max(min_valid_bytes, MIN_VALID_STREAM_BYTES)
+        if size >= valid_floor:
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except OSError:
+                    pass
+            temp_target.rename(out_path)
+            logger.info("record_stream_ffmpeg: completed %s (%d bytes)", out_path.name, size)
+            return out_path
+        else:
+            logger.warning(
+                "record_stream_ffmpeg: discarded small recording %s (%d bytes < %d floor)",
+                temp_target.name, size, valid_floor,
+            )
+            try:
+                temp_target.unlink()
+            except OSError:
+                pass
+
+    return None

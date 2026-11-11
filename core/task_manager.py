@@ -22,6 +22,7 @@ from core.recorder import (
     MIN_VALID_STREAM_BYTES,
     StreamInfo,
     probe_room,
+    record_stream_ffmpeg,
     record_stream_to_disk,
 )
 
@@ -64,14 +65,18 @@ class TaskManager:
 
     def __init__(
         self,
-        max_concurrent: int = 2,
+        max_concurrent: int = 4,
         recordings_dir: Optional[Path | str] = None,
         proxy: str = "",
         max_bytes: int = 1_800 * 1024 * 1024,
+        max_duration_sec: int = 900,
+        use_ffmpeg_recorder: bool = False,
     ) -> None:
         self.max_concurrent = max(1, max_concurrent)
         self.proxy = proxy
         self.max_bytes = max_bytes
+        self.max_duration_sec = max_duration_sec
+        self.use_ffmpeg_recorder = use_ffmpeg_recorder
 
         if recordings_dir is not None:
             self.recordings_dir = Path(recordings_dir)
@@ -343,16 +348,28 @@ class TaskManager:
             def on_progress(bytes_written: int, _elapsed: float) -> None:
                 job.bytes_recorded = bytes_written
 
-            result_mp4 = record_stream_to_disk(
-                info=info,
-                out_mp4=out_path,
-                stop_event=job.stop_event,
-                max_bytes=self.max_bytes,
-                on_progress=on_progress,
-                proxy=self.proxy,
-                reprobe_fn=_reprobe,
-                min_valid_bytes=MIN_VALID_STREAM_BYTES,
-            )
+            if self.use_ffmpeg_recorder:
+                result_mp4 = record_stream_ffmpeg(
+                    info=info,
+                    out_mp4=out_path,
+                    stop_event=job.stop_event,
+                    max_duration_sec=self.max_duration_sec,
+                    max_bytes=self.max_bytes,
+                    on_progress=on_progress,
+                    proxy=self.proxy,
+                    min_valid_bytes=MIN_VALID_STREAM_BYTES,
+                )
+            else:
+                result_mp4 = record_stream_to_disk(
+                    info=info,
+                    out_mp4=out_path,
+                    stop_event=job.stop_event,
+                    max_bytes=self.max_bytes,
+                    on_progress=on_progress,
+                    proxy=self.proxy,
+                    reprobe_fn=_reprobe,
+                    min_valid_bytes=MIN_VALID_STREAM_BYTES,
+                )
         except Exception as e:
             logger.exception("Recording failed for room %s: %s", job.room_id, e)
             job.error_message = str(e)

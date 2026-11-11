@@ -37,6 +37,8 @@ class Config:
     proxy: str = ""
     monitor_interval_sec: int = 300  # Default 5 minutes periodic check
     notify_on_status_change: bool = True
+    session_max_duration_sec: int = 900  # 15 mins rotation per session
+    use_ffmpeg_recorder: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
