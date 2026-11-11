@@ -223,10 +223,18 @@ class UploadQueue:
         is_video = suffix in (".mp4", ".mkv", ".mov", ".webm")
         attributes = None
         if is_video and DocumentAttributeVideo is not None:
-            media_info = inspect_media(item.file_path)
-            duration_s = int(media_info.duration or item.duration_sec or 0)
-            width = int(media_info.width or 1280)
-            height = int(media_info.height or 720)
+            raw_meta = inspect_media(item.file_path)
+            streams = raw_meta.get("streams", []) if isinstance(raw_meta, dict) else []
+            v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+            fmt = raw_meta.get("format", {}) if isinstance(raw_meta, dict) else {}
+
+            width = int(v_stream.get("width") or 1280)
+            height = int(v_stream.get("height") or 720)
+            try:
+                duration_s = int(float(fmt.get("duration") or item.duration_sec or 0))
+            except (ValueError, TypeError):
+                duration_s = int(item.duration_sec or 0)
+
             attributes = [
                 DocumentAttributeVideo(
                     duration=duration_s,
