@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+try:
+    from telethon.tl.types import DocumentAttributeVideo
+except ImportError:
+    DocumentAttributeVideo = None  # type: ignore
+
+from core.muxer import inspect_media
 from storage.history import HistoryStore
 
 logger = logging.getLogger(__name__)
@@ -215,6 +221,21 @@ class UploadQueue:
         # the device) are sent as documents so the footage is never lost.
         suffix = item.file_path.suffix.lower()
         is_video = suffix in (".mp4", ".mkv", ".mov", ".webm")
+        attributes = None
+        if is_video and DocumentAttributeVideo is not None:
+            media_info = inspect_media(item.file_path)
+            duration_s = int(media_info.duration or item.duration_sec or 0)
+            width = int(media_info.width or 1280)
+            height = int(media_info.height or 720)
+            attributes = [
+                DocumentAttributeVideo(
+                    duration=duration_s,
+                    w=width,
+                    h=height,
+                    supports_streaming=True,
+                )
+            ]
+
         try:
             await client.send_file(
                 chat_id,
@@ -222,6 +243,7 @@ class UploadQueue:
                 caption=caption,
                 progress_callback=progress_callback,
                 force_document=not is_video,
+                attributes=attributes,
             )
         except Exception:
             if is_video:
