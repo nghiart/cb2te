@@ -1128,6 +1128,8 @@ def record_stream_ffmpeg(
 
     cmd.extend([
         "-i", info.hls_url,
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
         "-c", "copy",
         "-t", str(max_duration_sec),
         "-movflags", "+faststart",
