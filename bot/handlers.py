@@ -45,6 +45,7 @@ def format_status_message(
     queue_status: dict[str, Any],
     free_disk_mb: int | float,
     retention_files_count: int,
+    all_rooms_status: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     """Format operational status overview for Telegram."""
     lines = [
@@ -61,9 +62,31 @@ def format_status_message(
             size = job.get("size_mb", 0)
             res = job.get("resolution", "")
             res_str = f" [{res}]" if res else ""
-            lines.append(f"  • `{room}`{res_str} - {st} ({size} MB)")
+            lines.append(f"  • `#{room}`{res_str} - {st} ({size} MB)")
     else:
         lines.append("  *(Không có phòng nào đang ghi)*")
+
+    # All tracked rooms status
+    if all_rooms_status:
+        lines.append(f"\n🌐 **Trạng thái các phòng theo dõi ({len(all_rooms_status)}):**")
+        for item in all_rooms_status:
+            r_id = item.get("room_id", "")
+            raw_st = item.get("status", "offline").lower()
+            res = item.get("resolution", "")
+            is_rec = item.get("is_recording", False)
+            res_info = f" [{res}]" if res else ""
+            rec_tag = " *(Đang ghi)*" if is_rec else ""
+
+            if "online" in raw_st:
+                icon = "🟢"
+                label = f"Online{res_info}"
+            elif "private" in raw_st:
+                icon = "🔒"
+                label = "Private"
+            else:
+                icon = "⚪"
+                label = "Offline"
+            lines.append(f"  • `#{r_id}`: {icon} {label}{rec_tag}")
 
     # Upload queue
     pending = queue_status.get("pending_count", 0)
@@ -212,6 +235,16 @@ def register_handlers(
             }
             for j in task_manager.get_active_jobs()
         ]
+        active_room_ids = {j.room_id for j in task_manager.get_active_jobs()}
+        all_rooms_status = [
+            {
+                "room_id": j.room_id,
+                "status": j.last_detected_status or "offline",
+                "resolution": j.last_detected_resolution,
+                "is_recording": j.room_id in active_room_ids,
+            }
+            for j in task_manager.list_jobs()
+        ]
         q_status = upload_queue.get_queue_status()
         disk_free = get_disk_free(task_manager.recordings_dir)
         records = history_store.list_records(active_only=True)
@@ -221,6 +254,7 @@ def register_handlers(
             queue_status=q_status,
             free_disk_mb=disk_free,
             retention_files_count=len(records),
+            all_rooms_status=all_rooms_status,
         )
         await event.reply(text)
 

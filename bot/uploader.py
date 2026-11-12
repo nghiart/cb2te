@@ -7,6 +7,7 @@ enforcing upload progress throttling and recording metadata into HistoryStore.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import time
 from dataclasses import dataclass, field
@@ -210,11 +211,10 @@ class UploadQueue:
                     pass
 
         # 3. Caption for final video
+        upload_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         caption = (
-            f"📹 [RECORDED] #{item.room_id}\n"
-            f"🕒 Thời lượng: {duration_str}\n"
-            f"📦 Dung lượng: {size_mb:.1f} MB\n"
-            f"⏳ Lưu trữ máy: 48 giờ trước khi xóa tự động."
+            f"#chaturbate #{item.room_id}\n"
+            f"📅 {upload_time_str}"
         )
 
         # 4. Stream upload via send_file.  Raw `.ts`/`.m4s` spools (mux failed on

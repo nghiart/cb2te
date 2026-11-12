@@ -93,6 +93,9 @@ class TaskManager:
         self._polling_lock = threading.Lock()
         self._on_file_ready: Optional[Callable[[Path, str, float], None]] = None
         self._on_status_change: Optional[Callable[[str, str, str, StreamInfo], None]] = None
+        self._on_batch_status_change: Optional[
+            Callable[[dict[str, tuple[str, StreamInfo]], list[tuple[str, str, str, StreamInfo]]], None]
+        ] = None
 
     def start_tracking(self, room_id: str) -> bool:
         """Start tracking a room. Returns True if newly added or reactivated, False otherwise."""
@@ -169,8 +172,21 @@ class TaskManager:
         with self._lock:
             self._on_status_change = cb
 
+    def set_on_batch_status_change_callback(
+        self,
+        cb: Callable[[dict[str, tuple[str, StreamInfo]], list[tuple[str, str, str, StreamInfo]]], None],
+    ) -> None:
+        """Set callback invoked on periodic check when at least one room status changes.
+
+        cb(all_statuses_map, list_of_changes)
+        all_statuses_map: {room_id: (display_status_label, info)}
+        list_of_changes: [(room_id, old_full, new_full, info)]
+        """
+        with self._lock:
+            self._on_batch_status_change = cb
+
     def check_all_room_statuses(self) -> list[tuple[str, StreamInfo, bool]]:
-        """Probe all tracked rooms and fire on_status_change if changed.
+        """Probe all tracked rooms and fire callbacks if any status changed.
 
         Returns: list of (room_id, stream_info, has_changed).
         """
@@ -178,6 +194,9 @@ class TaskManager:
             tracked_rooms = list(self._jobs.keys())
 
         results = []
+        all_statuses: dict[str, tuple[str, StreamInfo]] = {}
+        changes: list[tuple[str, str, str, StreamInfo]] = []
+
         for room in tracked_rooms:
             try:
                 info = probe_room(room, proxy=self.proxy)
@@ -205,14 +224,25 @@ class TaskManager:
                     job.last_detected_resolution = res_str
                     job.last_status_checked_at = time.time()
 
-            if changed and self._on_status_change:
-                try:
-                    new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
-                    self._on_status_change(room, old_full, new_full, info)
-                except Exception as e:
-                    logger.warning("Error in on_status_change for %s: %s", room, e)
+            new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
+            all_statuses[room] = (new_full, info)
+
+            if changed:
+                changes.append((room, old_full, new_full, info))
+                if self._on_status_change:
+                    try:
+                        self._on_status_change(room, old_full, new_full, info)
+                    except Exception as e:
+                        logger.warning("Error in on_status_change for %s: %s", room, e)
 
             results.append((room, info, changed))
+
+        if changes and self._on_batch_status_change:
+            try:
+                self._on_batch_status_change(all_statuses, changes)
+            except Exception as e:
+                logger.warning("Error in on_batch_status_change: %s", e)
+
         return results
 
     def poll_staggered_batch(self, stagger_seconds: float = 0.3) -> None:
@@ -293,7 +323,9 @@ class TaskManager:
                             if active_count < self.max_concurrent:
                                 now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
-                                out_path = self.recordings_dir / out_name
+                                room_dir = self.recordings_dir / "chaturbate" / job.room_id
+                                room_dir.mkdir(parents=True, exist_ok=True)
+                                out_path = room_dir / out_name
 
                                 job.status = JobStatus.RECORDING
                                 job.current_file = out_path

@@ -312,27 +312,65 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     # Wire status change notification to Telegram admins
     loop = asyncio.get_running_loop()
 
-    def on_status_change(room_id: str, old_status: str, new_status: str, info: StreamInfo):
+    def on_batch_status_change(
+        all_statuses: dict[str, tuple[str, StreamInfo]],
+        changes: list[tuple[str, str, str, StreamInfo]],
+    ):
         if not cfg.notify_on_status_change or not client or not cfg.admin_ids:
             return
 
-        icon = "🟢" if "online" in new_status.lower() else ("🔒" if "private" in new_status.lower() else "⚪")
-        res_info = f" ({info.resolution_label})" if info.resolution_label else ""
-        msg = (
-            f"🔔 **CẬP NHẬT TRẠNG THÁI MODEL**\n"
-            f"──────────────────────────────\n"
-            f"• Streamer: `#{room_id}`\n"
-            f"• Trạng thái: {icon} **{new_status.upper()}{res_info}**\n"
-            f"• Trước đó: `{old_status}`\n"
-            f"• Thời gian: `{datetime.now().strftime('%H:%M:%S')}`"
-        )
+        now_str = datetime.now().strftime("%H:%M:%S")
+        lines = [
+            "🌐 **[CHATURBATE] CẬP NHẬT TRẠNG THÁI PHÒNG**",
+            f"⏱️ **Thời gian:** `{now_str}` *(chu kỳ {cfg.monitor_interval_sec}s)*",
+            "──────────────────────────────",
+        ]
+
+        # 1. Changes section
+        lines.append("🔄 **BIẾN ĐỘNG MỚI:**")
+        for room, old_st, new_st, _info in changes:
+            old_icon = "🟢" if "online" in old_st.lower() else ("🔒" if "private" in old_st.lower() else "⚪")
+            new_icon = "🟢" if "online" in new_st.lower() else ("🔒" if "private" in new_st.lower() else "⚪")
+            lines.append(f"  • `#{room}`: {old_icon} `{old_st}` ➔ {new_icon} **{new_st}**")
+
+        # 2. Categorize all rooms
+        online_rooms: list[tuple[str, str]] = []
+        private_rooms: list[tuple[str, str]] = []
+        offline_rooms: list[str] = []
+
+        for room, (status_label, info) in all_statuses.items():
+            st_lower = status_label.lower()
+            if "online" in st_lower:
+                online_rooms.append((room, status_label))
+            elif "private" in st_lower:
+                private_rooms.append((room, status_label))
+            else:
+                offline_rooms.append(room)
+
+        lines.append(f"\n📋 **DANH SÁCH TẤT CẢ PHÒNG ({len(all_statuses)}):**")
+        if online_rooms:
+            lines.append(f"  🟢 **ONLINE ({len(online_rooms)}):**")
+            for room, lbl in online_rooms:
+                lines.append(f"    • `#{room}`: {lbl}")
+        if private_rooms:
+            lines.append(f"  🔒 **PRIVATE ({len(private_rooms)}):**")
+            for room, lbl in private_rooms:
+                lines.append(f"    • `#{room}`: {lbl}")
+        if offline_rooms:
+            lines.append(f"  ⚪ **OFFLINE ({len(offline_rooms)}):**")
+            for room in offline_rooms:
+                lines.append(f"    • `#{room}`")
+
+        lines.append("──────────────────────────────")
+        msg = "\n".join(lines)
+
         for admin_id in cfg.admin_ids:
             try:
                 loop.create_task(client.send_message(admin_id, msg))
             except Exception as e:
-                logger.debug("Failed to dispatch status notification: %s", e)
+                logger.debug("Failed to dispatch batch status notification: %s", e)
 
-    task_manager.set_on_status_change_callback(on_status_change)
+    task_manager.set_on_batch_status_change_callback(on_batch_status_change)
 
     stop_event = asyncio.Event()
 
@@ -370,14 +408,14 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
                     logger.warning("Polling batch error: %s", e)
                 poll_timer = 30
 
-            # 2. 5-minute periodic status check for all tracked rooms
+            # 2. Periodic status check for all tracked rooms
             if monitor_timer <= 0:
                 try:
-                    logger.info("Running 5-minute room status inspection check...")
+                    logger.info("Running periodic room status inspection check...")
                     await asyncio.to_thread(task_manager.check_all_room_statuses)
                 except Exception as e:
                     logger.warning("Room status check error: %s", e)
-                monitor_timer = max(60, cfg.monitor_interval_sec)
+                monitor_timer = max(10, cfg.monitor_interval_sec)
 
             # 3. 48-hour retention cleaner every 30 minutes (1800s)
             if clean_timer <= 0:

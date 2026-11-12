@@ -35,7 +35,7 @@ class Config:
     max_concurrent: int = 2
     min_free_mb: int = 400
     proxy: str = ""
-    monitor_interval_sec: int = 300  # Default 5 minutes periodic check
+    monitor_interval_sec: int = 60  # Default 60 seconds periodic check
     notify_on_status_change: bool = True
     session_max_duration_sec: int = 900  # 15 mins rotation per session
     use_ffmpeg_recorder: bool = True

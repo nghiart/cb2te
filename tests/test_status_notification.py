@@ -54,6 +54,48 @@ class TestStatusChangeNotification(unittest.TestCase):
         self.assertEqual(len(callback_events), 2)
         self.assertEqual(callback_events[1], ("cam_test", "online (1080p)", "private"))
 
+    @patch("core.task_manager.probe_room")
+    def test_batch_status_change_callback_triggered(self, mock_probe):
+        batch_events = []
+
+        def on_batch(all_statuses, changes):
+            batch_events.append((all_statuses, changes))
+
+        self.tm.set_on_batch_status_change_callback(on_batch)
+        self.tm.start_tracking("room_a")
+        self.tm.start_tracking("room_b")
+
+        # 1st probe: both offline initially
+        mock_probe.side_effect = [
+            StreamInfo(room_id="room_a", is_live=False, room_status="offline"),
+            StreamInfo(room_id="room_b", is_live=False, room_status="offline"),
+        ]
+        self.tm.check_all_room_statuses()
+        self.assertEqual(len(batch_events), 0)
+
+        # 2nd probe: room_a turns online, room_b stays offline
+        mock_probe.side_effect = [
+            StreamInfo(room_id="room_a", is_live=True, hls_url="http://x", resolution_label="720p"),
+            StreamInfo(room_id="room_b", is_live=False, room_status="offline"),
+        ]
+        self.tm.check_all_room_statuses()
+        self.assertEqual(len(batch_events), 1)
+        all_st, ch = batch_events[0]
+        self.assertIn("room_a", all_st)
+        self.assertIn("room_b", all_st)
+        self.assertEqual(len(ch), 1)
+        self.assertEqual(ch[0][0], "room_a")
+        self.assertEqual(ch[0][1], "offline")
+        self.assertEqual(ch[0][2], "online (720p)")
+
+        # 3rd probe: no change, batch callback must NOT be called again
+        mock_probe.side_effect = [
+            StreamInfo(room_id="room_a", is_live=True, hls_url="http://x", resolution_label="720p"),
+            StreamInfo(room_id="room_b", is_live=False, room_status="offline"),
+        ]
+        self.tm.check_all_room_statuses()
+        self.assertEqual(len(batch_events), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
