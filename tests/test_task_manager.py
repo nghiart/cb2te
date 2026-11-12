@@ -436,6 +436,38 @@ class TestTaskManager(unittest.TestCase):
         self.assertEqual(len(callback_called), 1)
         self.assertEqual(callback_called[0][1], "streamer_ff")
 
+    def test_resolution_and_transient_error_flapping_no_alert(self):
+        """Verify that resolution changes and transient probe errors don't trigger false alerts."""
+        tm = TaskManager(recordings_dir=self.rec_dir)
+        tm.start_tracking("stable_cam")
+        batch_mock = MagicMock()
+        tm.set_on_batch_status_change_callback(batch_mock)
+
+        with patch("core.task_manager.probe_room") as mock_probe:
+            # Baseline: initial status online (720p)
+            mock_probe.return_value = StreamInfo(room_id="stable_cam", is_live=True, resolution_label="720p")
+            res1 = tm.check_all_room_statuses(dispatch_recording=False)
+            self.assertFalse(res1[0][2])
+            batch_mock.assert_not_called()
+
+            # Resolution disappears or changes: should NOT alert
+            mock_probe.return_value = StreamInfo(room_id="stable_cam", is_live=True, resolution_label="")
+            res2 = tm.check_all_room_statuses(dispatch_recording=False)
+            self.assertFalse(res2[0][2])
+            batch_mock.assert_not_called()
+
+            # Transient error: should NOT alert
+            mock_probe.return_value = StreamInfo(room_id="stable_cam", is_live=False, room_status="error")
+            res3 = tm.check_all_room_statuses(dispatch_recording=False)
+            self.assertFalse(res3[0][2])
+            batch_mock.assert_not_called()
+
+            # Room genuinely goes offline: should alert
+            mock_probe.return_value = StreamInfo(room_id="stable_cam", is_live=False, room_status="offline")
+            res4 = tm.check_all_room_statuses(dispatch_recording=False)
+            self.assertTrue(res4[0][2])
+            self.assertEqual(batch_mock.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

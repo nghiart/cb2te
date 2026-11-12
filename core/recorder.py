@@ -487,10 +487,11 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
 
         res_label = f"{height}p" if height > 0 else ""
         if not res_label and hls_url:
-            # Check if variant has clues in URL like chunklist_720p or similar
-            m_res = re.search(r"(\d{3,4})p", hls_url, re.I)
+            # Check URL path only (never query string token) for standard resolution patterns
+            url_path = urllib.parse.urlparse(hls_url).path
+            m_res = re.search(r"(?:chunklist_|playlist_|\b)(240|360|480|540|720|1080|1440|2160)p", url_path, re.I)
             if m_res:
-                res_label = f"{m_res.group(1)}p"
+                res_label = f"{m_res.group(1).lower()}p"
 
         return StreamInfo(
             room_id=user,

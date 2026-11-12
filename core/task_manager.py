@@ -60,6 +60,22 @@ class RecordingJob:
     last_status_checked_at: float = 0.0
 
 
+def _normalize_stream_status(status_str: str, is_live: bool = False, is_recording: bool = False) -> str:
+    """Normalize raw stream status into fundamental states: online, private, offline, error."""
+    if is_recording or is_live:
+        return "online"
+    if not status_str:
+        return "offline"
+    s = status_str.strip().lower()
+    if "online" in s or "public" in s:
+        return "online"
+    if "private" in s or "away" in s or "hidden" in s:
+        return "private"
+    if "error" in s or "timeout" in s or "fail" in s:
+        return "error"
+    return "offline"
+
+
 class TaskManager:
     """Manages recording jobs, concurrency limits, staggered polling, and status change tracking."""
 
@@ -210,26 +226,43 @@ class TaskManager:
             except Exception as e:
                 info = StreamInfo(room_id=room, is_live=False, room_status="error", error=str(e))
 
-            status_str = "online" if info.is_live else (info.room_status or "offline")
-            res_str = info.resolution_label
-
             changed = False
             old_full = "unknown"
+            new_full = "unknown"
+
             with self._lock:
                 job = self._jobs.get(room)
                 if job:
-                    old_status = job.last_detected_status
-                    old_res = job.last_detected_resolution
-                    old_full = f"{old_status} ({old_res})" if (old_status == "online" and old_res) else old_status
+                    is_rec = job.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                    raw_new = "online" if info.is_live else (info.room_status or "offline")
+                    new_norm = _normalize_stream_status(raw_new, is_live=info.is_live, is_recording=is_rec)
+                    old_norm = _normalize_stream_status(job.last_detected_status) if job.last_detected_status != "unknown" else "unknown"
 
-                    new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
+                    res_str = info.resolution_label or job.last_detected_resolution
 
-                    if old_status != "unknown" and old_full != new_full:
+                    # Transient probe errors (network drop / HTTP 429/502) must NEVER flap status
+                    if new_norm == "error":
+                        new_norm = old_norm if old_norm != "unknown" else "offline"
+
+                    old_full = f"{old_norm} ({job.last_detected_resolution})" if (old_norm == "online" and job.last_detected_resolution) else old_norm
+                    new_full = f"{new_norm} ({res_str})" if (new_norm == "online" and res_str) else new_norm
+
+                    if old_norm == "unknown":
+                        # Initial baseline setup: record status without triggering alert
+                        job.last_detected_status = new_norm
+                        job.last_detected_resolution = res_str
+                        job.last_status_checked_at = time.time()
+                    elif old_norm != new_norm:
+                        # Fundamental state transition (offline <-> online <-> private)
                         changed = True
-
-                    job.last_detected_status = status_str
-                    job.last_detected_resolution = res_str
-                    job.last_status_checked_at = time.time()
+                        job.last_detected_status = new_norm
+                        job.last_detected_resolution = res_str
+                        job.last_status_checked_at = time.time()
+                    else:
+                        # State is identical (e.g. online -> online): update resolution if newly found
+                        if res_str and not job.last_detected_resolution:
+                            job.last_detected_resolution = res_str
+                        job.last_status_checked_at = time.time()
 
                     if dispatch_recording and info.is_live and info.hls_url:
                         if job.status == JobStatus.STANDBY:
@@ -261,7 +294,6 @@ class TaskManager:
                                 job.thread = t
                                 t.start()
 
-            new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
             all_statuses[room] = (new_full, info)
 
             if changed:
