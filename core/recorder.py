@@ -1153,7 +1153,6 @@ def record_stream_ffmpeg(
     cmd = [
         ffmpeg_bin,
         "-y",
-        "-nostdin",
         "-headers", headers_str,
         "-reconnect", "1",
         "-reconnect_streamed", "1",
@@ -1185,18 +1184,23 @@ def record_stream_ffmpeg(
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            text=True,
         )
 
         while proc.poll() is None:
             if stop_event.is_set():
-                logger.info("record_stream_ffmpeg: stop_event set, terminating ffmpeg for %s", clean_room)
-                proc.terminate()
+                logger.info("record_stream_ffmpeg: stop_event set, stopping ffmpeg gracefully for %s", clean_room)
                 try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                    proc.communicate(input="q", timeout=8)
+                except (subprocess.TimeoutExpired, Exception):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
                 break
 
             now = time.monotonic()
@@ -1214,22 +1218,28 @@ def record_stream_ffmpeg(
 
             if cur_bytes >= max_bytes:
                 logger.info("record_stream_ffmpeg: max_bytes reached (%d bytes), stopping %s", cur_bytes, clean_room)
-                proc.terminate()
                 try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                    proc.communicate(input="q", timeout=8)
+                except (subprocess.TimeoutExpired, Exception):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
                 break
 
             time.sleep(1.0)
 
         # Ensure process has fully exited and flushed output to disk
         if proc.poll() is None:
-            proc.terminate()
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                proc.communicate(input="q", timeout=5)
+            except (subprocess.TimeoutExpired, Exception):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         else:
             try:
                 proc.wait(timeout=5)
