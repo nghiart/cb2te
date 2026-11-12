@@ -38,7 +38,7 @@ class Config:
     monitor_interval_sec: int = 300  # Default 5 minutes periodic check
     notify_on_status_change: bool = True
     session_max_duration_sec: int = 900  # 15 mins rotation per session
-    use_ffmpeg_recorder: bool = False
+    use_ffmpeg_recorder: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,6 +114,10 @@ def load_config(path: Path) -> Config:
                     cfg.monitor_interval_sec = int(data["monitor_interval_sec"])
                 if "notify_on_status_change" in data:
                     cfg.notify_on_status_change = bool(data["notify_on_status_change"])
+                if "session_max_duration_sec" in data:
+                    cfg.session_max_duration_sec = int(data["session_max_duration_sec"])
+                if "use_ffmpeg_recorder" in data:
+                    cfg.use_ffmpeg_recorder = bool(data["use_ffmpeg_recorder"])
                 return cfg
         except (ValueError, TypeError):
             pass
@@ -177,6 +181,13 @@ def load_config(path: Path) -> Config:
                 pass
         elif k == "notify_on_status_change":
             cfg.notify_on_status_change = v.split("#")[0].strip().lower() in ("1", "true", "yes")
+        elif k == "session_max_duration_sec":
+            try:
+                cfg.session_max_duration_sec = int(v.split("#")[0].strip())
+            except ValueError:
+                pass
+        elif k == "use_ffmpeg_recorder":
+            cfg.use_ffmpeg_recorder = v.split("#")[0].strip().lower() in ("1", "true", "yes")
 
     return cfg
 
@@ -201,6 +212,8 @@ def save_config(cfg: Config, path: Path) -> None:
             f'PROXY = "{cfg.proxy}"',
             f"MONITOR_INTERVAL_SEC = {cfg.monitor_interval_sec}",
             f"NOTIFY_ON_STATUS_CHANGE = {1 if cfg.notify_on_status_change else 0}",
+            f"SESSION_MAX_DURATION_SEC = {cfg.session_max_duration_sec}",
+            f"USE_FFMPEG_RECORDER = {1 if cfg.use_ffmpeg_recorder else 0}",
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

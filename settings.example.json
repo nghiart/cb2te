@@ -1,16 +1,16 @@
 {
-  "api_id": 11518584,
-  "api_hash": "d7129d49a2a2e082489e0b5bd68ed83a",
-  "bot_token": "7576403651:AAENKI9E7jlaLlVN-yl4RU--QTYYmodPpQI",
-  "chat_id": -1001154181162,
-  "admin_ids": [
-    1491995718
-  ],
+  "api_id": 0,
+  "api_hash": "",
+  "bot_token": "",
+  "chat_id": 0,
+  "admin_ids": [],
   "retention_hours": 48,
   "max_concurrent": 2,
   "min_free_mb": 400,
   "proxy": "",
   "monitor_interval_sec": 300,
-  "notify_on_status_change": true
+  "notify_on_status_change": true,
+  "session_max_duration_sec": 900,
+  "use_ffmpeg_recorder": true
 }
 

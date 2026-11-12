@@ -142,6 +142,7 @@ class HlsPlaylist:
     vod: bool = False
     encrypted: bool = False
     media_sequence: int = 0
+    audio_playlists: dict[str, str] = field(default_factory=dict)
 
 
 class _HttpStatusError(Exception):
@@ -253,6 +254,15 @@ def parse_hls_playlist(text: str, base_url: str) -> HlsPlaylist:
                 pending_width = pending_height = 0
             pending_codecs = _parse_attribute(line, "CODECS").lower()
             pending_audio_group = _parse_attribute(line, "AUDIO")
+            continue
+
+        if line.startswith("#EXT-X-MEDIA"):
+            upper = line.upper()
+            if "TYPE=AUDIO" in upper:
+                group_id = _parse_attribute(line, "GROUP-ID")
+                uri = _parse_attribute(line, "URI")
+                if group_id and uri:
+                    playlist.audio_playlists[group_id] = urllib.parse.urljoin(base_url, uri)
             continue
 
         if line.startswith("#EXT-X-MAP"):
@@ -758,6 +768,7 @@ def record_stream_to_disk(
 
     master_url = info.hls_url
     playlist_url = info.hls_url
+
     seen_segments: dict[str, None] = {}
     bytes_written = 0
     start_time = time.monotonic()
@@ -844,11 +855,37 @@ def record_stream_to_disk(
                 # -- master playlist: pick a variant -------------------
                 if playlist.is_master:
                     chosen = select_variant(playlist.variants)
-                    if chosen is not None and chosen.url and chosen.url != playlist_url:
-                        logger.debug("record_stream_to_disk: variant %s (%dp)",
-                                     chosen.url, chosen.height)
-                        playlist_url = chosen.url
-                        continue
+                    if chosen is not None:
+                        # If the chosen variant relies on a separated audio group,
+                        # the single-stream Python recorder cannot record both audio & video.
+                        # Delegate to ffmpeg recorder if ffmpeg is available.
+                        if chosen.audio_group and playlist.audio_playlists.get(chosen.audio_group):
+                            if find_ffmpeg():
+                                logger.info(
+                                    "record_stream_to_disk: master playlist has separated audio group (%r) "
+                                    "- delegating to ffmpeg recorder to preserve audio",
+                                    chosen.audio_group,
+                                )
+                                return record_stream_ffmpeg(
+                                    info=info,
+                                    out_mp4=out_path,
+                                    stop_event=stop_event,
+                                    max_duration_sec=0,
+                                    max_bytes=max_bytes,
+                                    on_progress=on_progress,
+                                    proxy=proxy,
+                                    min_valid_bytes=min_valid_bytes,
+                                )
+                            logger.warning(
+                                "record_stream_to_disk: stream has separated audio group but ffmpeg "
+                                "is not available - recording VIDEO-ONLY"
+                            )
+
+                        if chosen.url and chosen.url != playlist_url:
+                            logger.debug("record_stream_to_disk: variant %s (%dp)",
+                                         chosen.url, chosen.height)
+                            playlist_url = chosen.url
+                            continue
                     logger.warning("record_stream_to_disk: unusable master playlist")
                     break
 
@@ -1131,7 +1168,12 @@ def record_stream_ffmpeg(
         "-map", "0:v:0",
         "-map", "0:a:0?",
         "-c", "copy",
-        "-t", str(max_duration_sec),
+    ])
+
+    if max_duration_sec and max_duration_sec > 0:
+        cmd.extend(["-t", str(max_duration_sec)])
+
+    cmd.extend([
         "-movflags", "+faststart",
         str(temp_target),
     ])
