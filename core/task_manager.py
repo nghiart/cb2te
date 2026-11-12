@@ -143,6 +143,10 @@ class TaskManager:
         with self._lock:
             return list(self._jobs.values())
 
+    def list_jobs(self) -> list[RecordingJob]:
+        """Alias for get_jobs() returning all tracked jobs."""
+        return self.get_jobs()
+
     def get_job(self, room_id: str) -> Optional[RecordingJob]:
         """Return the RecordingJob for a room if tracked, else None."""
         clean = normalize_room_id(room_id)

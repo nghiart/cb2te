@@ -218,3 +218,29 @@ class TestStorage(unittest.TestCase):
         records = self.store.list_records(active_only=False)
         self.assertEqual(len(records), 20)
 
+    def test_sync_with_disk_prunes_missing_files(self) -> None:
+        # File 1: exists in base_dir
+        f1 = self.tmp_dir / "vid1.mp4"
+        f1.write_text("v1")
+        self.store.record_upload(str(f1), "room_1")
+
+        # File 2: exists in hierarchical folder chaturbate/room_2/vid2.mp4
+        h_dir = self.tmp_dir / "chaturbate" / "room_2"
+        h_dir.mkdir(parents=True, exist_ok=True)
+        f2 = h_dir / "vid2.mp4"
+        f2.write_text("v2")
+        self.store.record_upload("vid2.mp4", "room_2")
+
+        # File 3: missing (was deleted manually)
+        self.store.record_upload(str(self.tmp_dir / "deleted_manually.mp4"), "room_3")
+
+        active = self.store.sync_with_disk(self.tmp_dir)
+        self.assertEqual(len(active), 2)
+        active_rooms = {r.room_id for r in active}
+        self.assertEqual(active_rooms, {"room_1", "room_2"})
+
+        # Record 3 should now be marked as purged
+        all_recs = self.store.list_records(active_only=False)
+        rec3 = next(r for r in all_recs if r.room_id == "room_3")
+        self.assertEqual(rec3.status, "purged")
+

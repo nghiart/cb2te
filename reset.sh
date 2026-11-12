@@ -80,3 +80,4 @@ if [ "$1" = "restart" ] || [ "$1" = "-r" ]; then
 else
     echo "ℹ️ [4/4] System is stopped. Run './reset.sh restart' or 'python3 1st.py bot' to start."
 fi
+

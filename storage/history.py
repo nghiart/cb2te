@@ -161,6 +161,62 @@ class HistoryStore:
                 return [r for r in self._records if r.status != "purged"]
             return list(self._records)
 
+    def sync_with_disk(self, base_dir: Path | str | None = None) -> list[HistoryRecord]:
+        """Prune records whose files no longer exist on disk.
+
+        Checks file existence across:
+        1. Exact path (absolute or relative to current working directory).
+        2. Relative to base_dir (if provided).
+        3. By filename under base_dir (flat storage).
+        4. By filename under base_dir/chaturbate/<room_id>/ (hierarchical storage).
+
+        Marks missing records as 'purged' and persists.
+        Returns:
+            list[HistoryRecord]: The active records whose files still exist on disk.
+        """
+        with self._lock:
+            base = Path(base_dir).resolve() if base_dir else None
+            changed = False
+            active: list[HistoryRecord] = []
+
+            for r in self._records:
+                if r.status == "purged":
+                    continue
+
+                p = Path(r.file_path)
+                exists = False
+
+                try:
+                    if p.is_file():
+                        exists = True
+                except OSError:
+                    pass
+
+                if not exists and base:
+                    candidates = [
+                        base / p,
+                        base / p.name,
+                        base / "chaturbate" / r.room_id / p.name,
+                    ]
+                    for cand in candidates:
+                        try:
+                            if cand.is_file():
+                                exists = True
+                                break
+                        except OSError:
+                            pass
+
+                if not exists:
+                    r.status = "purged"
+                    changed = True
+                else:
+                    active.append(r)
+
+            if changed:
+                self.save()
+
+            return active
+
     def get_record(self, file_path: str | Path) -> HistoryRecord | None:
         """Find record by file path (string or resolved path match)."""
         with self._lock:

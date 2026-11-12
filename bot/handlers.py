@@ -221,7 +221,7 @@ def register_handlers(
                 info = probe_room(room, proxy=config.proxy)
             except Exception as e:
                 info = None
-            records = history_store.list_records(active_only=False)
+            records = history_store.sync_with_disk(task_manager.recordings_dir)
             text = format_room_status_message(room, job, info, records)
             await event.reply(text)
             return
@@ -243,11 +243,11 @@ def register_handlers(
                 "resolution": j.last_detected_resolution,
                 "is_recording": j.room_id in active_room_ids,
             }
-            for j in task_manager.list_jobs()
+            for j in task_manager.get_jobs()
         ]
         q_status = upload_queue.get_queue_status()
         disk_free = get_disk_free(task_manager.recordings_dir)
-        records = history_store.list_records(active_only=True)
+        records = history_store.sync_with_disk(task_manager.recordings_dir)
 
         text = format_status_message(
             active_jobs=active_jobs,
@@ -397,7 +397,7 @@ def register_handlers(
         if not is_authorized(event.sender_id, config.admin_ids):
             return
 
-        records = history_store.list_records(active_only=True)
+        records = history_store.sync_with_disk(task_manager.recordings_dir)
         text = format_files_message(records, retention_hours=config.retention_hours)
         await event.reply(text)
 

@@ -420,6 +420,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
             # 3. 48-hour retention cleaner every 30 minutes (1800s)
             if clean_timer <= 0:
                 try:
+                    store.sync_with_disk(task_manager.recordings_dir)
                     cleaner.run_cleanup_cycle(
                         store,
                         retention_hours=cfg.retention_hours,
