@@ -1223,6 +1223,19 @@ def record_stream_ffmpeg(
 
             time.sleep(1.0)
 
+        # Ensure process has fully exited and flushed output to disk
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        else:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
     except Exception as exc:
         logger.error("record_stream_ffmpeg error for %s: %s", clean_room, exc)
         if proc and proc.poll() is None:
