@@ -1201,8 +1201,11 @@ def record_stream_ffmpeg(
     # Determine optimal recording quality (capped at max_height, default 1080p)
     target_idx = getattr(info, "selected_variant_idx", 0)
     has_variants = False
+    video_url = info.hls_url
+    audio_url = None
 
     try:
+        # Re-fetch master playlist to select variant and obtain sub-playlist URLs (with session tokens)
         m_res = http_request(info.hls_url, headers=_media_headers(clean_room), proxy=proxy, timeout=8)
         if m_res.ok and "#EXTM3U" in m_res.text:
             m_pl = parse_hls_playlist(m_res.text, info.hls_url)
@@ -1211,6 +1214,9 @@ def record_stream_ffmpeg(
                 chosen = select_variant(m_pl.variants, max_height=max_height)
                 if chosen and chosen in m_pl.variants:
                     target_idx = m_pl.variants.index(chosen)
+                    video_url = chosen.url
+                    if chosen.audio_group and chosen.audio_group in m_pl.audio_playlists:
+                        audio_url = m_pl.audio_playlists[chosen.audio_group]
                 max_var = max(m_pl.variants, key=lambda v: (v.height, v.bandwidth))
                 logger.info(
                     "record_stream_ffmpeg: room %s broadcasting at %dp (%dx%d), recording at %dp (%dx%d) [variant %d]",
@@ -1235,9 +1241,23 @@ def record_stream_ffmpeg(
     if proxy:
         cmd.extend(["-http_proxy", proxy])
 
-    if has_variants:
+    if audio_url:
         cmd.extend([
-            "-i", info.hls_url,
+            "-i", video_url,
+            "-headers", headers_str,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+        ])
+        if proxy:
+            cmd.extend(["-http_proxy", proxy])
+        cmd.extend([
+            "-i", audio_url,
+            "-c", "copy",
+        ])
+    elif has_variants:
+        cmd.extend([
+            "-i", video_url,
             "-map", f"0:p:{target_idx}:v:0",
             "-map", f"0:p:{target_idx}:a:0?",
             "-c", "copy",
