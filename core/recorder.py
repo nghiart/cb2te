@@ -115,6 +115,8 @@ class StreamInfo:
     selected_variant_idx: int = 0
     selected_height: int = 0
     selected_width: int = 0
+    selected_video_url: str = ""
+    selected_audio_url: str = ""
 
     def __post_init__(self):
         if not self.resolution_label and self.height > 0:
@@ -511,6 +513,8 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
         selected_variant_idx = 0
         selected_h = 0
         selected_w = 0
+        selected_video_url = ""
+        selected_audio_url = ""
         try:
             m_res = http_request(hls_url, headers=_media_headers(user), proxy=proxy, timeout=6)
             if m_res.ok and "#EXTM3U" in m_res.text:
@@ -525,6 +529,9 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
                         selected_variant_idx = pl.variants.index(chosen)
                         selected_h = chosen.height
                         selected_w = chosen.width
+                        selected_video_url = chosen.url
+                        if chosen.audio_group and chosen.audio_group in pl.audio_playlists:
+                            selected_audio_url = pl.audio_playlists[chosen.audio_group]
         except Exception as exc:
             logger.debug("probe %s: master playlist variant inspect failed: %s", user, exc)
 
@@ -547,6 +554,8 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
             selected_variant_idx=selected_variant_idx,
             selected_height=selected_h or height,
             selected_width=selected_w or width,
+            selected_video_url=selected_video_url,
+            selected_audio_url=selected_audio_url,
         )
 
     if status in _BLOCKED_STATUSES:
@@ -1200,34 +1209,34 @@ def record_stream_ffmpeg(
 
     # Determine optimal recording quality (capped at max_height, default 1080p)
     target_idx = getattr(info, "selected_variant_idx", 0)
-    has_variants = False
-    video_url = info.hls_url
-    audio_url = None
+    has_variants = bool(getattr(info, "selected_video_url", ""))
+    video_url = getattr(info, "selected_video_url", "") or info.hls_url
+    audio_url = getattr(info, "selected_audio_url", "") or None
 
-    try:
-        # Re-fetch master playlist to select variant and obtain sub-playlist URLs (with session tokens)
-        m_res = http_request(info.hls_url, headers=_media_headers(clean_room), proxy=proxy, timeout=8)
-        if m_res.ok and "#EXTM3U" in m_res.text:
-            m_pl = parse_hls_playlist(m_res.text, info.hls_url)
-            if m_pl.is_master and m_pl.variants:
-                has_variants = True
-                chosen = select_variant(m_pl.variants, max_height=max_height)
-                if chosen and chosen in m_pl.variants:
-                    target_idx = m_pl.variants.index(chosen)
-                    video_url = chosen.url
-                    if chosen.audio_group and chosen.audio_group in m_pl.audio_playlists:
-                        audio_url = m_pl.audio_playlists[chosen.audio_group]
-                max_var = max(m_pl.variants, key=lambda v: (v.height, v.bandwidth))
-                logger.info(
-                    "record_stream_ffmpeg: room %s broadcasting at %dp (%dx%d), recording at %dp (%dx%d) [variant %d]",
-                    clean_room,
-                    max_var.height, max_var.width,
-                    chosen.height if chosen else 0,
-                    chosen.width if chosen else 0,
-                    target_idx,
-                )
-    except Exception as exc:
-        logger.debug("record_stream_ffmpeg: variant probe error for %s: %s", clean_room, exc)
+    if not has_variants:
+        try:
+            m_res = http_request(info.hls_url, headers=_media_headers(clean_room), proxy=proxy, timeout=8)
+            if m_res.ok and "#EXTM3U" in m_res.text:
+                m_pl = parse_hls_playlist(m_res.text, info.hls_url)
+                if m_pl.is_master and m_pl.variants:
+                    has_variants = True
+                    chosen = select_variant(m_pl.variants, max_height=max_height)
+                    if chosen and chosen in m_pl.variants:
+                        target_idx = m_pl.variants.index(chosen)
+                        video_url = chosen.url
+                        if chosen.audio_group and chosen.audio_group in m_pl.audio_playlists:
+                            audio_url = m_pl.audio_playlists[chosen.audio_group]
+                    max_var = max(m_pl.variants, key=lambda v: (v.height, v.bandwidth))
+                    logger.info(
+                        "record_stream_ffmpeg: room %s broadcasting at %dp (%dx%d), recording at %dp (%dx%d) [variant %d]",
+                        clean_room,
+                        max_var.height, max_var.width,
+                        chosen.height if chosen else 0,
+                        chosen.width if chosen else 0,
+                        target_idx,
+                    )
+        except Exception as exc:
+            logger.debug("record_stream_ffmpeg: variant probe error for %s: %s", clean_room, exc)
 
     cmd = [
         ffmpeg_bin,
