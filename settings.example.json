@@ -8,7 +8,7 @@
   "max_concurrent": 2,
   "min_free_mb": 400,
   "proxy": "",
-  "monitor_interval_sec": 300,
+  "monitor_interval_sec": 60,
   "notify_on_status_change": true,
   "session_max_duration_sec": 900,
   "use_ffmpeg_recorder": true

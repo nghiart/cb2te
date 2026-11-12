@@ -320,48 +320,50 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
             return
 
         now_str = datetime.now().strftime("%H:%M:%S")
+
+        # 1. Title ngay đầu thông báo: #abc vừa offline/online/private
+        header_changes = []
+        for room, _old_st, new_st, info in changes:
+            st_lower = new_st.lower()
+            if "online" in st_lower:
+                res = f" [{info.resolution_label}]" if info.resolution_label else ""
+                header_changes.append(f"🔔 `#{room}` vừa online{res}")
+            elif "private" in st_lower:
+                header_changes.append(f"🔔 `#{room}` vừa private")
+            else:
+                header_changes.append(f"🔔 `#{room}` vừa offline")
+
         lines = [
-            "🌐 **[CHATURBATE] CẬP NHẬT TRẠNG THÁI PHÒNG**",
-            f"⏱️ **Thời gian:** `{now_str}` *(chu kỳ {cfg.monitor_interval_sec}s)*",
-            "──────────────────────────────",
+            "\n".join(header_changes),
+            f"⏱️ Thời gian: `{now_str}`",
+            f"📋 Trạng thái tất cả các phòng ({len(all_statuses)}):",
         ]
 
-        # 1. Changes section
-        lines.append("🔄 **BIẾN ĐỘNG MỚI:**")
-        for room, old_st, new_st, _info in changes:
-            old_icon = "🟢" if "online" in old_st.lower() else ("🔒" if "private" in old_st.lower() else "⚪")
-            new_icon = "🟢" if "online" in new_st.lower() else ("🔒" if "private" in new_st.lower() else "⚪")
-            lines.append(f"  • `#{room}`: {old_icon} `{old_st}` ➔ {new_icon} **{new_st}**")
+        active_jobs = {j.room_id for j in task_manager.get_active_jobs()}
 
-        # 2. Categorize all rooms
-        online_rooms: list[tuple[str, str]] = []
-        private_rooms: list[tuple[str, str]] = []
-        offline_rooms: list[str] = []
+        def _sort_key(item):
+            r, (lbl, _) = item
+            if "online" in lbl.lower():
+                return (0, r)
+            if "private" in lbl.lower():
+                return (1, r)
+            return (2, r)
 
-        for room, (status_label, info) in all_statuses.items():
+        for room, (status_label, info) in sorted(all_statuses.items(), key=_sort_key):
             st_lower = status_label.lower()
+            rec_tag = " *(Đang ghi)*" if room in active_jobs else ""
             if "online" in st_lower:
-                online_rooms.append((room, status_label))
+                res = f" [{info.resolution_label}]" if info.resolution_label else ""
+                icon = "🟢"
+                label = f"Online{res}"
             elif "private" in st_lower:
-                private_rooms.append((room, status_label))
+                icon = "🔒"
+                label = "Private"
             else:
-                offline_rooms.append(room)
+                icon = "⚪"
+                label = "Offline"
+            lines.append(f"• `#{room}`: {icon} {label}{rec_tag}")
 
-        lines.append(f"\n📋 **DANH SÁCH TẤT CẢ PHÒNG ({len(all_statuses)}):**")
-        if online_rooms:
-            lines.append(f"  🟢 **ONLINE ({len(online_rooms)}):**")
-            for room, lbl in online_rooms:
-                lines.append(f"    • `#{room}`: {lbl}")
-        if private_rooms:
-            lines.append(f"  🔒 **PRIVATE ({len(private_rooms)}):**")
-            for room, lbl in private_rooms:
-                lines.append(f"    • `#{room}`: {lbl}")
-        if offline_rooms:
-            lines.append(f"  ⚪ **OFFLINE ({len(offline_rooms)}):**")
-            for room in offline_rooms:
-                lines.append(f"    • `#{room}`")
-
-        lines.append("──────────────────────────────")
         msg = "\n".join(lines)
 
         for admin_id in cfg.admin_ids:
@@ -393,31 +395,20 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         except Exception as e:
             logger.error("Failed to connect Telegram Bot: %s", e)
 
-    # Main operational loop
-    poll_timer = 0
+    # Main operational loop: check all rooms every monitor_interval_sec (default 60s)
     clean_timer = 0
-    monitor_timer = cfg.monitor_interval_sec  # default 300s (5 minutes)
+    cycle_interval = max(10, cfg.monitor_interval_sec)
 
     try:
         while not stop_event.is_set():
-            # 1. Staggered probe poll every 30 seconds for recording candidates
-            if poll_timer <= 0:
-                try:
-                    await asyncio.to_thread(task_manager.poll_staggered_batch, 0.3)
-                except Exception as e:
-                    logger.warning("Polling batch error: %s", e)
-                poll_timer = 30
+            # 1. 60-second periodic status check for all rooms & live recording dispatch
+            try:
+                logger.info("Running room status inspection check (cycle %ds)...", cycle_interval)
+                await asyncio.to_thread(task_manager.check_all_room_statuses, True, 0.3)
+            except Exception as e:
+                logger.warning("Room status check error: %s", e)
 
-            # 2. Periodic status check for all tracked rooms
-            if monitor_timer <= 0:
-                try:
-                    logger.info("Running periodic room status inspection check...")
-                    await asyncio.to_thread(task_manager.check_all_room_statuses)
-                except Exception as e:
-                    logger.warning("Room status check error: %s", e)
-                monitor_timer = max(10, cfg.monitor_interval_sec)
-
-            # 3. 48-hour retention cleaner every 30 minutes (1800s)
+            # 2. 48-hour retention cleaner every 30 minutes (1800s)
             if clean_timer <= 0:
                 try:
                     store.sync_with_disk(task_manager.recordings_dir)
@@ -430,12 +421,11 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
                     logger.warning("Retention cleaner error: %s", e)
                 clean_timer = 1800
 
+            # Wait for next cycle or shutdown signal
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+                await asyncio.wait_for(stop_event.wait(), timeout=float(cycle_interval))
             except asyncio.TimeoutError:
-                poll_timer -= 1
-                monitor_timer -= 1
-                clean_timer -= 1
+                clean_timer -= cycle_interval
     finally:
         logger.info("Cleaning up daemon resources...")
         task_manager.stop_all(wait=True, timeout=120.0)

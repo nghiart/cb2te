@@ -189,9 +189,12 @@ class TaskManager:
         with self._lock:
             self._on_batch_status_change = cb
 
-    def check_all_room_statuses(self) -> list[tuple[str, StreamInfo, bool]]:
+    def check_all_room_statuses(
+        self, dispatch_recording: bool = False, stagger_seconds: float = 0.0
+    ) -> list[tuple[str, StreamInfo, bool]]:
         """Probe all tracked rooms and fire callbacks if any status changed.
 
+        If dispatch_recording=True, automatically starts recording live rooms up to max_concurrent.
         Returns: list of (room_id, stream_info, has_changed).
         """
         with self._lock:
@@ -201,7 +204,7 @@ class TaskManager:
         all_statuses: dict[str, tuple[str, StreamInfo]] = {}
         changes: list[tuple[str, str, str, StreamInfo]] = []
 
-        for room in tracked_rooms:
+        for idx, room in enumerate(tracked_rooms):
             try:
                 info = probe_room(room, proxy=self.proxy)
             except Exception as e:
@@ -228,6 +231,36 @@ class TaskManager:
                     job.last_detected_resolution = res_str
                     job.last_status_checked_at = time.time()
 
+                    if dispatch_recording and info.is_live and info.hls_url:
+                        if job.status == JobStatus.STANDBY:
+                            active_count = sum(
+                                1
+                                for j in self._jobs.values()
+                                if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                            )
+                            if active_count < self.max_concurrent:
+                                now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
+                                room_dir = self.recordings_dir / "chaturbate" / job.room_id
+                                room_dir.mkdir(parents=True, exist_ok=True)
+                                out_path = room_dir / out_name
+
+                                job.status = JobStatus.RECORDING
+                                job.current_file = out_path
+                                job.started_at = time.time()
+                                job.bytes_recorded = 0
+                                job.error_message = ""
+                                job.stop_event.clear()
+
+                                t = threading.Thread(
+                                    target=self._record_worker,
+                                    args=(job, info, out_path),
+                                    name=f"rec-{job.room_id}",
+                                    daemon=True,
+                                )
+                                job.thread = t
+                                t.start()
+
             new_full = f"{status_str} ({res_str})" if (status_str == "online" and res_str) else status_str
             all_statuses[room] = (new_full, info)
 
@@ -240,6 +273,9 @@ class TaskManager:
                         logger.warning("Error in on_status_change for %s: %s", room, e)
 
             results.append((room, info, changed))
+
+            if stagger_seconds > 0 and idx < len(tracked_rooms) - 1:
+                time.sleep(stagger_seconds)
 
         if changes and self._on_batch_status_change:
             try:
