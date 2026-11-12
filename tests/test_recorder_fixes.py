@@ -18,11 +18,13 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from core.recorder import (
+    DEFAULT_MAX_RECORDING_HEIGHT,
     HlsVariant,
     StreamInfo,
     normalize_hls_url,
     parse_hls_playlist,
     probe_room,
+    record_stream_ffmpeg,
     record_stream_to_disk,
     select_variant,
 )
@@ -100,6 +102,31 @@ class TestHlsParsing(unittest.TestCase):
             HlsVariant(url="https://e/live.m3u8", height=720, codecs="avc1,mp4a"),
         ]
         self.assertEqual(select_variant(variants).url, "https://e/live.m3u8")
+
+    def test_select_variant_ceiling_1080p(self):
+        v360 = HlsVariant(url="https://e/360.m3u8", height=360, bandwidth=800000, codecs="avc1,mp4a")
+        v720 = HlsVariant(url="https://e/720.m3u8", height=720, bandwidth=2500000, codecs="avc1,mp4a")
+        v1080 = HlsVariant(url="https://e/1080.m3u8", height=1080, bandwidth=5000000, codecs="avc1,mp4a")
+        v1440 = HlsVariant(url="https://e/1440.m3u8", height=1440, bandwidth=8000000, codecs="avc1,mp4a")
+        v2160 = HlsVariant(url="https://e/2160.m3u8", height=2160, bandwidth=15000000, codecs="avc1,mp4a")
+
+        # 1. Full variant list with 4K: ceiling 1080p must pick 1080p
+        all_vars = [v360, v720, v1080, v1440, v2160]
+        chosen = select_variant(all_vars, max_height=1080)
+        self.assertEqual(chosen.height, 1080)
+        self.assertEqual(chosen.url, "https://e/1080.m3u8")
+
+        # 2. Max height 720p ceiling: must pick 720p
+        chosen_720 = select_variant(all_vars, max_height=720)
+        self.assertEqual(chosen_720.height, 720)
+
+        # 3. Streamer only offers 1440p and 2160p: fallback to lowest above 1080p (1440p)
+        chosen_above = select_variant([v1440, v2160], max_height=1080)
+        self.assertEqual(chosen_above.height, 1440)
+
+        # 4. Streamer max broadcast is 720p: pick 720p
+        chosen_lower = select_variant([v360, v720], max_height=1080)
+        self.assertEqual(chosen_lower.height, 720)
 
     def test_normalize_hls_url_unescapes(self):
         self.assertEqual(
@@ -328,6 +355,48 @@ class TestProbeFallbacks(unittest.TestCase):
         info = probe_room("cam_html", prefer_ts=False)
         self.assertTrue(info.is_live)
         self.assertEqual(info.hls_url, "https://edge.example.com/live/playlist.m3u8")
+
+    @patch("core.recorder.find_ffmpeg")
+    @patch("subprocess.Popen")
+    @patch("core.recorder.http_request")
+    def test_record_stream_ffmpeg_maps_optimal_program_variant(self, mock_http, mock_popen, mock_ffmpeg):
+        mock_ffmpeg.return_value = "/usr/bin/ffmpeg"
+        master_m3u8 = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=896000,RESOLUTION=640x360\n'
+            "chunklist_360.m3u8\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=3096000,RESOLUTION=1280x720\n'
+            "chunklist_720.m3u8\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=5128000,RESOLUTION=1920x1080\n'
+            "chunklist_1080.m3u8\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=2560x1440\n'
+            "chunklist_1440.m3u8\n"
+        )
+        fake_res = MagicMock(ok=True, text=master_m3u8)
+        mock_http.return_value = fake_res
+
+        proc_mock = MagicMock()
+        proc_mock.poll.return_value = 0
+        proc_mock.wait.return_value = 0
+        mock_popen.return_value = proc_mock
+
+        with TemporaryDirectory() as tmp:
+            out_file = Path(tmp) / "rec.mp4"
+            # Create a fake part file so it passes size check
+            part_file = out_file.with_name("rec.part.mp4")
+            part_file.write_bytes(b"data" * 20000)
+
+            info = StreamInfo(room_id="star", is_live=True, hls_url="https://edge.example.com/master.m3u8")
+            stop_evt = threading.Event()
+            res = record_stream_ffmpeg(info, out_file, stop_evt, max_duration_sec=10, max_height=1080)
+
+            self.assertIsNotNone(res)
+            # Verify the command passed to Popen
+            call_cmd = mock_popen.call_args[0][0]
+            # Variant 2 is 1080p (index 2 out of [360, 720, 1080, 1440])
+            self.assertIn("-map", call_cmd)
+            self.assertIn("0:p:2:v:0", call_cmd)
+            self.assertIn("0:p:2:a:0?", call_cmd)
 
 
 class TestDoctorOffline(unittest.TestCase):

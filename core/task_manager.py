@@ -87,12 +87,14 @@ class TaskManager:
         max_bytes: int = 1_800 * 1024 * 1024,
         max_duration_sec: int = 900,
         use_ffmpeg_recorder: bool = False,
+        max_recording_height: int = 1080,
     ) -> None:
         self.max_concurrent = max(1, max_concurrent)
         self.proxy = proxy
         self.max_bytes = max_bytes
         self.max_duration_sec = max_duration_sec
         self.use_ffmpeg_recorder = use_ffmpeg_recorder
+        self.max_recording_height = max_recording_height
 
         if recordings_dir is not None:
             self.recordings_dir = Path(recordings_dir)
@@ -462,6 +464,7 @@ class TaskManager:
                     on_progress=on_progress,
                     proxy=self.proxy,
                     min_valid_bytes=MIN_VALID_STREAM_BYTES,
+                    max_height=self.max_recording_height,
                 )
             else:
                 result_mp4 = record_stream_to_disk(

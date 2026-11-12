@@ -53,6 +53,7 @@ __all__ = [
     "HlsVariant",
     "HlsPlaylist",
     "MIN_VALID_STREAM_BYTES",
+    "DEFAULT_MAX_RECORDING_HEIGHT",
     "probe_room",
     "probe_hls",
     "normalize_hls_url",
@@ -66,6 +67,9 @@ __all__ = [
 
 #: A session shorter than this is considered noise and is discarded.
 MIN_VALID_STREAM_BYTES = 64 * 1024
+
+#: Maximum recording resolution ceiling (default 1080p).
+DEFAULT_MAX_RECORDING_HEIGHT = 1080
 
 #: Room states that mean "online but not recordable".
 _BLOCKED_STATUSES = {
@@ -108,6 +112,9 @@ class StreamInfo:
     room_status: str = ""
     error: str = ""
     resolution_label: str = ""
+    selected_variant_idx: int = 0
+    selected_height: int = 0
+    selected_width: int = 0
 
     def __post_init__(self):
         if not self.resolution_label and self.height > 0:
@@ -315,11 +322,15 @@ def parse_hls_playlist(text: str, base_url: str) -> HlsPlaylist:
     return playlist
 
 
-def select_variant(variants: list[HlsVariant]) -> Optional[HlsVariant]:
-    """Pick the best recordable variant: highest resolution, browser codecs first.
+def select_variant(
+    variants: list[HlsVariant],
+    max_height: int = DEFAULT_MAX_RECORDING_HEIGHT,
+) -> Optional[HlsVariant]:
+    """Pick the best recordable variant up to max_height (ceiling, default 1080p).
 
-    ``_fast``/low-latency variants are deprioritised because they drop segments
-    for non-ffmpeg consumers.
+    Highest resolution <= max_height, browser codecs first, avoiding fast variants.
+    If no variant satisfies <= max_height, falls back to the lowest resolution
+    above max_height (or lowest available) to avoid unmanageable load.
     """
     if not variants:
         return None
@@ -329,6 +340,17 @@ def select_variant(variants: list[HlsVariant]) -> Optional[HlsVariant]:
         browser_av = 1 if ("avc1" in codecs and ("mp4a" in codecs or "opus" in codecs)) else 0
         slow = 0 if "fast" in v.url.lower() else 1
         return (slow, browser_av, v.height, v.bandwidth, v.width)
+
+    if max_height and max_height > 0:
+        capped = [v for v in variants if 0 < v.height <= max_height]
+        if capped:
+            return max(capped, key=score)
+        zero_height = [v for v in variants if v.height == 0]
+        if zero_height and len(zero_height) == len(variants):
+            return max(zero_height, key=score)
+        above = [v for v in variants if v.height > max_height]
+        if above:
+            return min(above, key=lambda v: (v.height, v.bandwidth))
 
     return max(variants, key=score)
 
@@ -485,6 +507,27 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
         width = _int_or_zero(payload.get("width") if isinstance(payload, dict) else 0)
         height = _int_or_zero(payload.get("height") if isinstance(payload, dict) else 0)
 
+        # Inspect master playlist to determine actual live resolution and best recording variant (cap 1080p)
+        selected_variant_idx = 0
+        selected_h = 0
+        selected_w = 0
+        try:
+            m_res = http_request(hls_url, headers=_media_headers(user), proxy=proxy, timeout=6)
+            if m_res.ok and "#EXTM3U" in m_res.text:
+                pl = parse_hls_playlist(m_res.text, hls_url)
+                if pl.is_master and pl.variants:
+                    max_v = max(pl.variants, key=lambda v: (v.height, v.bandwidth))
+                    if max_v.height > 0:
+                        height = max_v.height
+                        width = max_v.width
+                    chosen = select_variant(pl.variants, max_height=DEFAULT_MAX_RECORDING_HEIGHT)
+                    if chosen and chosen in pl.variants:
+                        selected_variant_idx = pl.variants.index(chosen)
+                        selected_h = chosen.height
+                        selected_w = chosen.width
+        except Exception as exc:
+            logger.debug("probe %s: master playlist variant inspect failed: %s", user, exc)
+
         res_label = f"{height}p" if height > 0 else ""
         if not res_label and hls_url:
             # Check URL path only (never query string token) for standard resolution patterns
@@ -501,6 +544,9 @@ def probe_room(room_id: str, proxy: str = "", *, prefer_ts: bool = True) -> Stre
             height=height,
             room_status=status or "public",
             resolution_label=res_label,
+            selected_variant_idx=selected_variant_idx,
+            selected_height=selected_h or height,
+            selected_width=selected_w or width,
         )
 
     if status in _BLOCKED_STATUSES:
@@ -1100,6 +1146,7 @@ def record_stream_ffmpeg(
     on_progress: Optional[Callable[[int, float], None]] = None,
     proxy: str = "",
     min_valid_bytes: int = 0,
+    max_height: int = DEFAULT_MAX_RECORDING_HEIGHT,
 ) -> Path | None:
     """Record an HLS live stream directly to MP4 via ffmpeg subprocess.
 
@@ -1151,6 +1198,31 @@ def record_stream_ffmpeg(
         f"Origin: https://chaturbate.com\r\n"
     )
 
+    # Determine optimal recording quality (capped at max_height, default 1080p)
+    target_idx = getattr(info, "selected_variant_idx", 0)
+    has_variants = False
+
+    try:
+        m_res = http_request(info.hls_url, headers=_media_headers(clean_room), proxy=proxy, timeout=8)
+        if m_res.ok and "#EXTM3U" in m_res.text:
+            m_pl = parse_hls_playlist(m_res.text, info.hls_url)
+            if m_pl.is_master and m_pl.variants:
+                has_variants = True
+                chosen = select_variant(m_pl.variants, max_height=max_height)
+                if chosen and chosen in m_pl.variants:
+                    target_idx = m_pl.variants.index(chosen)
+                max_var = max(m_pl.variants, key=lambda v: (v.height, v.bandwidth))
+                logger.info(
+                    "record_stream_ffmpeg: room %s broadcasting at %dp (%dx%d), recording at %dp (%dx%d) [variant %d]",
+                    clean_room,
+                    max_var.height, max_var.width,
+                    chosen.height if chosen else 0,
+                    chosen.width if chosen else 0,
+                    target_idx,
+                )
+    except Exception as exc:
+        logger.debug("record_stream_ffmpeg: variant probe error for %s: %s", clean_room, exc)
+
     cmd = [
         ffmpeg_bin,
         "-y",
@@ -1163,12 +1235,20 @@ def record_stream_ffmpeg(
     if proxy:
         cmd.extend(["-http_proxy", proxy])
 
-    cmd.extend([
-        "-i", info.hls_url,
-        "-map", "0:v:0",
-        "-map", "0:a:0?",
-        "-c", "copy",
-    ])
+    if has_variants:
+        cmd.extend([
+            "-i", info.hls_url,
+            "-map", f"0:p:{target_idx}:v:0",
+            "-map", f"0:p:{target_idx}:a:0?",
+            "-c", "copy",
+        ])
+    else:
+        cmd.extend([
+            "-i", info.hls_url,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c", "copy",
+        ])
 
     if max_duration_sec and max_duration_sec > 0:
         cmd.extend(["-t", str(max_duration_sec)])

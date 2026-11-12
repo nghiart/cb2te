@@ -39,6 +39,7 @@ class Config:
     notify_on_status_change: bool = True
     session_max_duration_sec: int = 900  # 15 mins rotation per session
     use_ffmpeg_recorder: bool = True
+    max_recording_height: int = 1080  # Max recording quality ceiling (default 1080p)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +119,8 @@ def load_config(path: Path) -> Config:
                     cfg.session_max_duration_sec = int(data["session_max_duration_sec"])
                 if "use_ffmpeg_recorder" in data:
                     cfg.use_ffmpeg_recorder = bool(data["use_ffmpeg_recorder"])
+                if "max_recording_height" in data:
+                    cfg.max_recording_height = int(data["max_recording_height"])
                 return cfg
         except (ValueError, TypeError):
             pass
@@ -188,6 +191,11 @@ def load_config(path: Path) -> Config:
                 pass
         elif k == "use_ffmpeg_recorder":
             cfg.use_ffmpeg_recorder = v.split("#")[0].strip().lower() in ("1", "true", "yes")
+        elif k in ("max_recording_height", "max_height", "max_res"):
+            try:
+                cfg.max_recording_height = int(v.split("#")[0].strip())
+            except ValueError:
+                pass
 
     return cfg
 
@@ -214,6 +222,7 @@ def save_config(cfg: Config, path: Path) -> None:
             f"NOTIFY_ON_STATUS_CHANGE = {1 if cfg.notify_on_status_change else 0}",
             f"SESSION_MAX_DURATION_SEC = {cfg.session_max_duration_sec}",
             f"USE_FFMPEG_RECORDER = {1 if cfg.use_ffmpeg_recorder else 0}",
+            f"MAX_RECORDING_HEIGHT = {cfg.max_recording_height}",
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
