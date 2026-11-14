@@ -280,6 +280,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         max_duration_sec=getattr(cfg, "session_max_duration_sec", 900),
         use_ffmpeg_recorder=getattr(cfg, "use_ffmpeg_recorder", True),
         max_recording_height=getattr(cfg, "max_recording_height", 1080),
+        min_free_mb=getattr(cfg, "min_free_mb", 400),
     )
 
     # Wire recording finalization to upload queue

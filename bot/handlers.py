@@ -156,6 +156,7 @@ def format_help_message() -> str:
         "• `/add <user>` - Thêm streamer vào danh sách theo dõi\n"
         "• `/del <user>` - Xóa streamer khỏi danh sách theo dõi\n"
         "• `/files` - Xem danh sách video đã ghi trong 48h qua\n"
+        "• `/clean [user|all]` - Xóa thủ công file video đã ghi/upload để giải phóng dung lượng\n"
         "• `/help` - Hiển thị hướng dẫn này"
     )
 
@@ -401,6 +402,113 @@ def register_handlers(
         text = format_files_message(records, retention_hours=config.retention_hours)
         await event.reply(text)
 
+    async def handle_clean(event: Any) -> None:
+        if not is_authorized(event.sender_id, config.admin_ids):
+            return
+
+        parts = (event.raw_text or "").strip().split(maxsplit=1)
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+        records = history_store.sync_with_disk(task_manager.recordings_dir)
+        if not records:
+            # Also check if there are any lingering mp4 files in recordings_dir
+            rec_dir = Path(task_manager.recordings_dir)
+            extra_files = list(rec_dir.rglob("*.mp4")) if rec_dir.exists() else []
+            if not extra_files:
+                await event.reply("ℹ️ Không có file video nào cần dọn dẹp trên ổ đĩa.")
+                return
+
+        # Determine which files to delete
+        deleted_count = 0
+        freed_bytes = 0
+        deleted_names = []
+
+        rec_dir = Path(task_manager.recordings_dir).resolve()
+
+        if not target or target.lower() == "all":
+            # Delete all uploaded/recorded files
+            for r in list(records):
+                p = Path(r.file_path)
+                candidates = [
+                    p,
+                    rec_dir / p,
+                    rec_dir / p.name,
+                    rec_dir / "chaturbate" / r.room_id / p.name,
+                ]
+                for cand in candidates:
+                    try:
+                        if cand.is_file():
+                            sz = cand.stat().st_size
+                            cand.unlink()
+                            freed_bytes += sz
+                            deleted_count += 1
+                            deleted_names.append(cand.name)
+                            break
+                    except OSError:
+                        pass
+                history_store.mark_purged(r.file_path)
+
+            # Prune empty directories
+            try:
+                for sub in rec_dir.glob("chaturbate/*"):
+                    if sub.is_dir() and not any(sub.iterdir()):
+                        sub.rmdir()
+            except OSError:
+                pass
+
+            freed_mb = freed_bytes / (1024 * 1024)
+            current_free = get_disk_free(rec_dir)
+            history_store.sync_with_disk(rec_dir)
+            await event.reply(
+                f"🧹 **Đã dọn dẹp toàn bộ:** Xóa `{deleted_count}` video.\n"
+                f"💾 **Dung lượng giải phóng:** `{freed_mb:.1f} MB`\n"
+                f"📊 **Dung lượng trống hiện tại:** `{int(current_free)} MB`"
+            )
+        else:
+            # Delete for specific room or file match
+            room = normalize_room_id(target)
+            matched_records = [
+                r for r in records
+                if (room and r.room_id.lower() == room.lower()) or (target.lower() in Path(r.file_path).name.lower())
+            ]
+
+            if not matched_records:
+                await event.reply(f"⚠️ Không tìm thấy file video nào phù hợp với `{target}` để xóa.")
+                return
+
+            for r in matched_records:
+                p = Path(r.file_path)
+                candidates = [
+                    p,
+                    rec_dir / p,
+                    rec_dir / p.name,
+                    rec_dir / "chaturbate" / r.room_id / p.name,
+                ]
+                for cand in candidates:
+                    try:
+                        if cand.is_file():
+                            sz = cand.stat().st_size
+                            cand.unlink()
+                            freed_bytes += sz
+                            deleted_count += 1
+                            deleted_names.append(cand.name)
+                            break
+                    except OSError:
+                        pass
+                history_store.mark_purged(r.file_path)
+
+            freed_mb = freed_bytes / (1024 * 1024)
+            current_free = get_disk_free(rec_dir)
+            history_store.sync_with_disk(rec_dir)
+            lines = [
+                f"🗑 **Đã xóa thủ công {deleted_count} video cho `{target}`:**",
+                "• " + "\n• ".join(deleted_names[:10]),
+            ]
+            if len(deleted_names) > 10:
+                lines.append(f"... và {len(deleted_names) - 10} file khác")
+            lines.append(f"\n💾 Giải phóng: `{freed_mb:.1f} MB` | Trống: `{int(current_free)} MB`")
+            await event.reply("\n".join(lines))
+
     dispatch_map: dict[str, Callable] = {
         "/start": handle_start,
         "/help": handle_help,
@@ -412,6 +520,7 @@ def register_handlers(
         "/add": handle_add,
         "/del": handle_del,
         "/files": handle_files,
+        "/clean": handle_clean,
     }
 
     # If Telethon client is active, bind events.NewMessage

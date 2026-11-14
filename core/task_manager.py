@@ -16,7 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
-from core.android import get_recordings_dir, release_os_memory
+from core.android import get_disk_free, get_recordings_dir, is_disk_low, release_os_memory
 from core.config import normalize_room_id
 from core.recorder import (
     MIN_VALID_STREAM_BYTES,
@@ -88,6 +88,7 @@ class TaskManager:
         max_duration_sec: int = 900,
         use_ffmpeg_recorder: bool = False,
         max_recording_height: int = 1080,
+        min_free_mb: int = 400,
     ) -> None:
         self.max_concurrent = max(1, max_concurrent)
         self.proxy = proxy
@@ -95,6 +96,7 @@ class TaskManager:
         self.max_duration_sec = max_duration_sec
         self.use_ffmpeg_recorder = use_ffmpeg_recorder
         self.max_recording_height = max_recording_height
+        self.min_free_mb = min_free_mb
 
         if recordings_dir is not None:
             self.recordings_dir = Path(recordings_dir)
@@ -268,33 +270,40 @@ class TaskManager:
 
                     if dispatch_recording and info.is_live and info.hls_url:
                         if job.status == JobStatus.STANDBY:
-                            active_count = sum(
-                                1
-                                for j in self._jobs.values()
-                                if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
-                            )
-                            if active_count < self.max_concurrent:
-                                now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
-                                room_dir = self.recordings_dir / "chaturbate" / job.room_id
-                                room_dir.mkdir(parents=True, exist_ok=True)
-                                out_path = room_dir / out_name
-
-                                job.status = JobStatus.RECORDING
-                                job.current_file = out_path
-                                job.started_at = time.time()
-                                job.bytes_recorded = 0
-                                job.error_message = ""
-                                job.stop_event.clear()
-
-                                t = threading.Thread(
-                                    target=self._record_worker,
-                                    args=(job, info, out_path),
-                                    name=f"rec-{job.room_id}",
-                                    daemon=True,
+                            if self.min_free_mb > 0 and is_disk_low(self.recordings_dir, self.min_free_mb):
+                                logger.warning(
+                                    "Low disk space (<%d MB). Pausing recording dispatch for room %s.",
+                                    self.min_free_mb, job.room_id,
                                 )
-                                job.thread = t
-                                t.start()
+                                job.error_message = f"Paused: low disk space (<{self.min_free_mb} MB)"
+                            else:
+                                active_count = sum(
+                                    1
+                                    for j in self._jobs.values()
+                                    if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                                )
+                                if active_count < self.max_concurrent:
+                                    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
+                                    room_dir = self.recordings_dir / "chaturbate" / job.room_id
+                                    room_dir.mkdir(parents=True, exist_ok=True)
+                                    out_path = room_dir / out_name
+
+                                    job.status = JobStatus.RECORDING
+                                    job.current_file = out_path
+                                    job.started_at = time.time()
+                                    job.bytes_recorded = 0
+                                    job.error_message = ""
+                                    job.stop_event.clear()
+
+                                    t = threading.Thread(
+                                        target=self._record_worker,
+                                        args=(job, info, out_path),
+                                        name=f"rec-{job.room_id}",
+                                        daemon=True,
+                                    )
+                                    job.thread = t
+                                    t.start()
 
             all_statuses[room] = (new_full, info)
 
@@ -389,38 +398,40 @@ class TaskManager:
                             self._jobs.get(job.room_id) is job
                             and job.status == JobStatus.STANDBY
                         ):
-                            active_count = sum(
-                                1
-                                for j in self._jobs.values()
-                                if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
-                            )
-                            if active_count < self.max_concurrent:
-                                now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
-                                room_dir = self.recordings_dir / "chaturbate" / job.room_id
-                                room_dir.mkdir(parents=True, exist_ok=True)
-                                out_path = room_dir / out_name
-
-                                job.status = JobStatus.RECORDING
-                                job.current_file = out_path
-                                job.started_at = time.time()
-                                job.bytes_recorded = 0
-                                job.error_message = ""
-                                job.stop_event.clear()
-
-                                t = threading.Thread(
-                                    target=self._record_worker,
-                                    args=(job, info, out_path),
-                                    name=f"rec-{job.room_id}",
-                                    daemon=True,
-                                raid=False) if hasattr(threading.Thread, "raid") else threading.Thread(
-                                    target=self._record_worker,
-                                    args=(job, info, out_path),
-                                    name=f"rec-{job.room_id}",
-                                    daemon=True,
+                            if self.min_free_mb > 0 and is_disk_low(self.recordings_dir, self.min_free_mb):
+                                logger.warning(
+                                    "Low disk space (<%d MB). Pausing recording dispatch for room %s.",
+                                    self.min_free_mb, job.room_id,
                                 )
-                                job.thread = t
-                                t.start()
+                                job.error_message = f"Paused: low disk space (<{self.min_free_mb} MB)"
+                            else:
+                                active_count = sum(
+                                    1
+                                    for j in self._jobs.values()
+                                    if j.status in (JobStatus.RECORDING, JobStatus.MUXING)
+                                )
+                                if active_count < self.max_concurrent:
+                                    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    out_name = f"chaturbate_{job.room_id}_{now_str}.mp4"
+                                    room_dir = self.recordings_dir / "chaturbate" / job.room_id
+                                    room_dir.mkdir(parents=True, exist_ok=True)
+                                    out_path = room_dir / out_name
+
+                                    job.status = JobStatus.RECORDING
+                                    job.current_file = out_path
+                                    job.started_at = time.time()
+                                    job.bytes_recorded = 0
+                                    job.error_message = ""
+                                    job.stop_event.clear()
+
+                                    t = threading.Thread(
+                                        target=self._record_worker,
+                                        args=(job, info, out_path),
+                                        name=f"rec-{job.room_id}",
+                                        daemon=True,
+                                    )
+                                    job.thread = t
+                                    t.start()
                 elif info is not None and not info.is_live:
                     if info.room_status in ("error", "geo_blocked"):
                         job.error_message = info.error or info.room_status
@@ -453,6 +464,12 @@ class TaskManager:
         try:
             def on_progress(bytes_written: int, _elapsed: float) -> None:
                 job.bytes_recorded = bytes_written
+                if self.min_free_mb > 0 and is_disk_low(self.recordings_dir, self.min_free_mb):
+                    logger.warning(
+                        "Low disk space during recording (<%d MB). Stopping recording for room %s.",
+                        self.min_free_mb, job.room_id,
+                    )
+                    job.stop_event.set()
 
             if self.use_ffmpeg_recorder:
                 result_mp4 = record_stream_ffmpeg(
