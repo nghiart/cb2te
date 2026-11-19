@@ -266,13 +266,25 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     """Run full async daemon with Telegram Bot, TaskManager, UploaderQueue, and RetentionCleaner."""
     from bot.telegram_bot import init_telegram_bot
     from bot.uploader import UploadItem, UploadQueue
+    from bot.upload_store import UploadStore
+    from bot.postprocessor import Postprocessor, enqueue_remux
+    from bot.monitor import ProcessWatchdog
 
     logger.info("Starting Termux Telegram Recorder daemon (1st.py)...")
     acquire_wake_lock()
 
     store = HistoryStore(db_path)
     cleaner = RetentionCleaner(recordings_dir=recordings_dir)
-    upload_queue = UploadQueue()
+    upload_store = UploadStore(db_path=recordings_dir / "upload_queue.db")
+    upload_queue = UploadQueue(upload_store=upload_store)
+    watchdog = ProcessWatchdog()
+
+    postprocessor = Postprocessor(
+        on_upload_ready=lambda mp4, room, dur: upload_queue.enqueue(
+            UploadItem(file_path=mp4, room_id=room, duration_sec=dur)
+        )
+    )
+
     task_manager = TaskManager(
         max_concurrent=cfg.max_concurrent,
         recordings_dir=recordings_dir,
@@ -283,15 +295,18 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         min_free_mb=getattr(cfg, "min_free_mb", 400),
     )
 
-    # Wire recording finalization to upload queue
-    def on_file_ready(output_mp4: Path, room_id: str, duration_sec: float):
-        logger.info("File ready: %s (%s, %.1fs)", output_mp4, room_id, duration_sec)
-        item = UploadItem(
-            file_path=output_mp4,
-            room_id=room_id,
-            duration_sec=int(duration_sec),
-        )
-        upload_queue.enqueue(item)
+    # Wire recording finalization to upload queue or postprocessor
+    def on_file_ready(output_file: Path, room_id: str, duration_sec: float):
+        logger.info("File ready: %s (%s, %.1fs)", output_file, room_id, duration_sec)
+        if output_file.suffix.lower() == ".ts":
+            enqueue_remux(output_file, room_id, int(duration_sec))
+        else:
+            item = UploadItem(
+                file_path=output_file,
+                room_id=room_id,
+                duration_sec=int(duration_sec),
+            )
+            upload_queue.enqueue(item)
 
     task_manager.set_on_file_ready_callback(on_file_ready)
 
@@ -391,6 +406,10 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     # Start bot and uploader worker
     if client:
         try:
+            await upload_store.init()
+            await upload_queue.recover_pending()
+            await postprocessor.start()
+            await watchdog.start()
             await client.start(bot_token=cfg.bot_token)
             logger.info("Telegram Bot connected successfully.")
             await upload_queue.start_worker(client, cfg.chat_id, store)
@@ -403,10 +422,22 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
 
     try:
         while not stop_event.is_set():
+            # Dynamic backpressure governance
+            backlog_sec, speed_mbps = upload_queue.estimate_backlog()
+            if backlog_sec > 900:
+                logger.warning("High upload backlog (%.0fs > 900s). Lowering recording ceiling to 720p.", backlog_sec)
+                task_manager.max_recording_height = 720
+            elif backlog_sec < 300:
+                task_manager.max_recording_height = getattr(cfg, "max_recording_height", 1080)
+
             # 1. 60-second periodic status check for all rooms & live recording dispatch
             try:
-                logger.info("Running room status inspection check (cycle %ds)...", cycle_interval)
-                await asyncio.to_thread(task_manager.check_all_room_statuses, True, 0.3)
+                logger.info("Running room status inspection check (cycle %ds, backlog %.0fs)...", cycle_interval, backlog_sec)
+                # Pause new recordings dispatch if backlog exceeds 1800s
+                dispatch = backlog_sec <= 1800
+                if not dispatch:
+                    logger.warning("Severe upload backlog (%.0fs > 1800s). Pausing recording dispatch.", backlog_sec)
+                await asyncio.to_thread(task_manager.check_all_room_statuses, dispatch, 0.3)
             except Exception as e:
                 logger.warning("Room status check error: %s", e)
 
@@ -431,7 +462,10 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     finally:
         logger.info("Cleaning up daemon resources...")
         task_manager.stop_all(wait=True, timeout=120.0)
+        await postprocessor.stop()
+        await watchdog.stop()
         await upload_queue.stop_worker()
+        await upload_store.close()
         if client and hasattr(client, "disconnect"):
             try:
                 await client.disconnect()

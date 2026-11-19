@@ -313,11 +313,11 @@ def register_handlers(
         target = parts[1].strip()
         room = normalize_room_id(target)
 
-        # Look for matching mp4 files in recordings_dir
+        # Look for matching mp4 files in recordings_dir (recursive search)
         rec_dir = Path(task_manager.recordings_dir)
         matched = []
         if rec_dir.exists():
-            for f in rec_dir.glob("*.mp4"):
+            for f in rec_dir.rglob("*.mp4"):
                 if room and room in f.name.lower():
                     matched.append(f)
                 elif target.lower() in f.name.lower():

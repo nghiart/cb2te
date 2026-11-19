@@ -91,7 +91,13 @@ def init_telegram_bot(
                 "không kết nối được. Cài bằng: pip install 'python-socks[asyncio]'"
             )
 
-    client = TelegramClient(session_name, config.api_id, config.api_hash, proxy=proxy)
+    client = TelegramClient(
+        session_name,
+        config.api_id,
+        config.api_hash,
+        proxy=proxy,
+        flood_sleep_threshold=0,  # Do not sleep silently, let uploader handle FloodWait explicitly
+    )
     register_handlers(
         client=client,
         config=config,

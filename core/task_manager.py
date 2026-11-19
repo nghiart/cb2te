@@ -58,6 +58,36 @@ class RecordingJob:
     last_detected_status: str = "unknown"
     last_detected_resolution: str = ""
     last_status_checked_at: float = 0.0
+    fail_count: int = 0
+    cooldown_until: float = 0.0
+
+    def mark_error(self, error: str) -> None:
+        """Increment fail count and compute backoff cooldown."""
+        self.fail_count += 1
+        self.error_message = error
+        now = time.time()
+        if self.fail_count >= 5:
+            self.status = JobStatus.STANDBY  # Remain in standby but un-dispatchable
+            # Exponential backoff: 30s, 2m, 5m, 15m, 1h
+            backoffs = [30.0, 120.0, 300.0, 900.0, 3600.0]
+            wait = backoffs[min(self.fail_count - 5, len(backoffs) - 1)]
+            self.cooldown_until = now + wait
+        else:
+            self.cooldown_until = now + 60.0
+
+    def mark_success(self) -> None:
+        """Reset fail count and cooldown on successful operations."""
+        self.fail_count = 0
+        self.cooldown_until = 0.0
+        self.error_message = ""
+
+    def can_dispatch(self) -> bool:
+        """Check if job is ready to be dispatched for recording."""
+        if self.status != JobStatus.STANDBY:
+            return False
+        if self.cooldown_until and time.time() < self.cooldown_until:
+            return False
+        return True
 
 
 def _normalize_stream_status(status_str: str, is_live: bool = False, is_recording: bool = False) -> str:
@@ -269,7 +299,7 @@ class TaskManager:
                         job.last_status_checked_at = time.time()
 
                     if dispatch_recording and info.is_live and info.hls_url:
-                        if job.status == JobStatus.STANDBY:
+                        if job.can_dispatch():
                             if self.min_free_mb > 0 and is_disk_low(self.recordings_dir, self.min_free_mb):
                                 logger.warning(
                                     "Low disk space (<%d MB). Pausing recording dispatch for room %s.",
@@ -505,8 +535,10 @@ class TaskManager:
                     job.status = JobStatus.STOPPED
                 elif job.error_message:
                     job.status = JobStatus.ERROR
+                    job.mark_error(job.error_message)
                 else:
                     job.status = JobStatus.STANDBY
+                    job.mark_success()
                 job.current_file = None
 
             if result_mp4 and result_mp4.exists() and result_mp4.stat().st_size > 0:

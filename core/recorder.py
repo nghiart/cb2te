@@ -63,6 +63,7 @@ __all__ = [
     "select_variant",
     "record_stream_to_disk",
     "record_stream_ffmpeg",
+    "record_stream_segmented",
 ]
 
 #: A session shorter than this is considered noise and is discarded.
@@ -1386,3 +1387,188 @@ def record_stream_ffmpeg(
                 pass
 
     return None
+
+
+def record_stream_segmented(
+    info: StreamInfo,
+    output_dir: Path | str,
+    stop_event: threading.Event,
+    segment_time: int = 900,
+    on_segment_closed: Optional[Callable[[Path, str, int], None]] = None,
+    on_progress: Optional[Callable[[int, float], None]] = None,
+    proxy: str = "",
+    max_height: int = DEFAULT_MAX_RECORDING_HEIGHT,
+) -> None:
+    """Seamless continuous recording using ffmpeg -f segment in mpegts format.
+
+    Does not terminate every 900s; ffmpeg runs continuously, rotating .ts segments.
+    Each finished .ts segment is emitted via on_segment_closed callback for postprocessing.
+    """
+    if not info.is_live or not info.hls_url:
+        logger.warning("record_stream_segmented: stream not live or missing HLS URL")
+        return
+
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        logger.warning("record_stream_segmented: ffmpeg not found")
+        return
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    clean_room = normalize_room_id(info.room_id) or "stream"
+
+    user_agent = chaturbate_headers(clean_room).get(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    )
+    headers_str = (
+        f"User-Agent: {user_agent}\r\n"
+        f"Referer: https://chaturbate.com/{clean_room}/\r\n"
+        f"Origin: https://chaturbate.com\r\n"
+    )
+
+    target_idx = getattr(info, "selected_variant_idx", 0)
+    has_variants = bool(getattr(info, "selected_video_url", ""))
+    video_url = getattr(info, "selected_video_url", "") or info.hls_url
+    audio_url = getattr(info, "selected_audio_url", "") or None
+
+    if not has_variants:
+        try:
+            m_res = http_request(info.hls_url, headers=_media_headers(clean_room), proxy=proxy, timeout=8)
+            if m_res.ok and "#EXTM3U" in m_res.text:
+                m_pl = parse_hls_playlist(m_res.text, info.hls_url)
+                if m_pl.is_master and m_pl.variants:
+                    has_variants = True
+                    chosen = select_variant(m_pl.variants, max_height=max_height)
+                    if chosen and chosen in m_pl.variants:
+                        target_idx = m_pl.variants.index(chosen)
+                        video_url = chosen.url
+                        if chosen.audio_group and chosen.audio_group in m_pl.audio_playlists:
+                            audio_url = m_pl.audio_playlists[chosen.audio_group]
+        except Exception as exc:
+            logger.debug("record_stream_segmented: variant probe error for %s: %s", clean_room, exc)
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-headers", headers_str,
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+    ]
+
+    if proxy:
+        cmd.extend(["-http_proxy", proxy])
+
+    if audio_url:
+        cmd.extend([
+            "-i", video_url,
+            "-headers", headers_str,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+        ])
+        if proxy:
+            cmd.extend(["-http_proxy", proxy])
+        cmd.extend([
+            "-i", audio_url,
+            "-c", "copy",
+        ])
+    elif has_variants:
+        cmd.extend([
+            "-i", video_url,
+            "-map", f"0:p:{target_idx}:v:0",
+            "-map", f"0:p:{target_idx}:a:0?",
+            "-c", "copy",
+        ])
+    else:
+        cmd.extend([
+            "-i", info.hls_url,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c", "copy",
+        ])
+
+    now_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    segment_pattern = str(out_dir / f"chaturbate_{clean_room}_{now_prefix}_%03d.ts")
+
+    cmd.extend([
+        "-f", "segment",
+        "-segment_time", str(segment_time),
+        "-reset_timestamps", "1",
+        "-segment_format", "mpegts",
+        "-segment_list", "pipe:1",
+        "-segment_list_type", "csv",
+        segment_pattern,
+    ])
+
+    logger.info("record_stream_segmented: starting continuous recording for %s", clean_room)
+    start_mono = time.monotonic()
+    proc: Optional[subprocess.Popen] = None
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+        # Thread to drain stdout continuously to prevent pipe buffer stalling
+        def read_stdout_loop():
+            if not proc or not proc.stdout:
+                return
+            for raw_line in iter(proc.stdout.readline, ""):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                # Line format: "segment_filename,start_time,end_time"
+                seg_name = line.split(",")[0].strip()
+                if seg_name:
+                    seg_path = out_dir / seg_name
+                    logger.info("record_stream_segmented: finished segment %s for %s", seg_name, clean_room)
+                    if on_segment_closed:
+                        try:
+                            on_segment_closed(seg_path, clean_room, segment_time)
+                        except Exception as e:
+                            logger.error("Error in on_segment_closed callback for %s: %s", seg_name, e)
+
+        stdout_thread = threading.Thread(target=read_stdout_loop, name=f"seg-out-{clean_room}", daemon=True)
+        stdout_thread.start()
+
+        while proc.poll() is None:
+            if stop_event.is_set():
+                logger.info("record_stream_segmented: stop_event set for %s", clean_room)
+                try:
+                    proc.communicate(input="q", timeout=8)
+                except (subprocess.TimeoutExpired, Exception):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                break
+
+            now = time.monotonic()
+            elapsed = now - start_mono
+            if on_progress:
+                on_progress(0, elapsed)
+            time.sleep(1.0)
+
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    except Exception as exc:
+        logger.error("record_stream_segmented error for %s: %s", clean_room, exc)
+        if proc and proc.poll() is None:
+            proc.kill()
+    finally:
+        release_os_memory()
+
