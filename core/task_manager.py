@@ -426,7 +426,7 @@ class TaskManager:
                     with self._lock:
                         if (
                             self._jobs.get(job.room_id) is job
-                            and job.status == JobStatus.STANDBY
+                            and job.can_dispatch()
                         ):
                             if self.min_free_mb > 0 and is_disk_low(self.recordings_dir, self.min_free_mb):
                                 logger.warning(
