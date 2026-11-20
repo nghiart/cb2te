@@ -66,7 +66,7 @@ echo "✅ [3/4] Reset and cleanup complete!"
 # Check if restart argument provided
 if [ "$1" = "restart" ] || [ "$1" = "-r" ]; then
     echo "🚀 [4/4] Restarting daemon in background..."
-    nohup python3 1st.py bot > daemon.log 2>&1 </dev/null &
+    nohup python3 -u 1st.py bot > daemon.log 2>&1 </dev/null &
     NEW_PID=$!
     sleep 2
     if kill -0 "$NEW_PID" 2>/dev/null; then
