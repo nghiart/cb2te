@@ -331,6 +331,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     async def _send_safe_message(target: int | str, text: str) -> None:
         try:
             await client.send_message(target, text)
+            logger.info("Sent Telegram notification to %s", target)
         except Exception as exc:
             logger.warning("Failed to send Telegram message to %s: %s", target, exc)
 
@@ -346,7 +347,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
 
         for target in targets:
             try:
-                loop.create_task(_send_safe_message(target, text))
+                asyncio.run_coroutine_threadsafe(_send_safe_message(target, text), loop)
             except Exception as e:
                 logger.warning("Failed to schedule telegram message to %s: %s", target, e)
 
