@@ -1239,14 +1239,21 @@ def record_stream_ffmpeg(
         except Exception as exc:
             logger.debug("record_stream_ffmpeg: variant probe error for %s: %s", clean_room, exc)
 
+    reconnect_args = [
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_on_http_error", "4xx,5xx",
+        "-reconnect_delay_max", "10",
+    ]
+
     cmd = [
         ffmpeg_bin,
         "-y",
         "-headers", headers_str,
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
     ]
+    cmd.extend(reconnect_args)
 
     if proxy:
         cmd.extend(["-http_proxy", proxy])
@@ -1255,10 +1262,8 @@ def record_stream_ffmpeg(
         cmd.extend([
             "-i", video_url,
             "-headers", headers_str,
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
         ])
+        cmd.extend(reconnect_args)
         if proxy:
             cmd.extend(["-http_proxy", proxy])
         cmd.extend([
@@ -1448,16 +1453,23 @@ def record_stream_segmented(
         except Exception as exc:
             logger.debug("record_stream_segmented: variant probe error for %s: %s", clean_room, exc)
 
+    reconnect_args = [
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_on_http_error", "4xx,5xx",
+        "-reconnect_delay_max", "10",
+    ]
+
     cmd = [
         ffmpeg_bin,
         "-y",
         "-hide_banner",
         "-loglevel", "warning",
         "-headers", headers_str,
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
     ]
+    cmd.extend(reconnect_args)
 
     if proxy:
         cmd.extend(["-http_proxy", proxy])
@@ -1466,10 +1478,8 @@ def record_stream_segmented(
         cmd.extend([
             "-i", video_url,
             "-headers", headers_str,
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
         ])
+        cmd.extend(reconnect_args)
         if proxy:
             cmd.extend(["-http_proxy", proxy])
         cmd.extend([

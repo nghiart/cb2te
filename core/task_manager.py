@@ -92,7 +92,7 @@ class RecordingJob:
 
 def _normalize_stream_status(status_str: str, is_live: bool = False, is_recording: bool = False) -> str:
     """Normalize raw stream status into fundamental states: online, private, offline, error."""
-    if is_recording or is_live:
+    if is_live:
         return "online"
     if not status_str:
         return "offline"
@@ -115,7 +115,7 @@ class TaskManager:
         recordings_dir: Optional[Path | str] = None,
         proxy: str = "",
         max_bytes: int = 1_800 * 1024 * 1024,
-        max_duration_sec: int = 900,
+        max_duration_sec: int = 7200,
         use_ffmpeg_recorder: bool = False,
         max_recording_height: int = 1080,
         min_free_mb: int = 400,
@@ -142,6 +142,8 @@ class TaskManager:
         self._lock = threading.RLock()
         self._polling_lock = threading.Lock()
         self._on_file_ready: Optional[Callable[[Path, str, float], None]] = None
+        self._on_session_started: Optional[Callable[[str, StreamInfo, Path], None]] = None
+        self._on_session_finished: Optional[Callable[[str, float, int, Optional[Path]], None]] = None
         self._on_status_change: Optional[Callable[[str, str, str, StreamInfo], None]] = None
         self._on_batch_status_change: Optional[
             Callable[[dict[str, tuple[str, StreamInfo]], list[tuple[str, str, str, StreamInfo]]], None]
@@ -218,6 +220,20 @@ class TaskManager:
         """Set callback invoked as cb(output_mp4_path, room_id, duration_sec) on file completion."""
         with self._lock:
             self._on_file_ready = cb
+
+    def set_on_session_started_callback(
+        self, cb: Callable[[str, StreamInfo, Path], None]
+    ) -> None:
+        """Set callback invoked when a room starts recording."""
+        with self._lock:
+            self._on_session_started = cb
+
+    def set_on_session_finished_callback(
+        self, cb: Callable[[str, float, int, Optional[Path]], None]
+    ) -> None:
+        """Set callback invoked when a recording session finishes."""
+        with self._lock:
+            self._on_session_finished = cb
 
     def set_on_status_change_callback(
         self, cb: Callable[[str, str, str, StreamInfo], None]
@@ -334,6 +350,12 @@ class TaskManager:
                                     )
                                     job.thread = t
                                     t.start()
+
+                                    if self._on_session_started:
+                                        try:
+                                            self._on_session_started(job.room_id, info, out_path)
+                                        except Exception as e:
+                                            logger.warning("Error in on_session_started callback for %s: %s", job.room_id, e)
 
             all_statuses[room] = (new_full, info)
 
@@ -462,6 +484,12 @@ class TaskManager:
                                     )
                                     job.thread = t
                                     t.start()
+
+                                    if self._on_session_started:
+                                        try:
+                                            self._on_session_started(job.room_id, info, out_path)
+                                        except Exception as e:
+                                            logger.warning("Error in on_session_started callback for %s: %s", job.room_id, e)
                 elif info is not None and not info.is_live:
                     if info.room_status in ("error", "geo_blocked"):
                         job.error_message = info.error or info.room_status
@@ -540,16 +568,25 @@ class TaskManager:
                     job.status = JobStatus.STANDBY
                     job.mark_success()
                 job.current_file = None
+                job.last_detected_status = "offline"
 
-            if result_mp4 and result_mp4.exists() and result_mp4.stat().st_size > 0:
-                if result_mp4.suffix.lower() not in (".mp4", ".mkv"):
+            saved_file = result_mp4 if (result_mp4 and result_mp4.exists() and result_mp4.stat().st_size > 0) else None
+
+            if self._on_session_finished:
+                try:
+                    self._on_session_finished(job.room_id, duration_sec, job.bytes_recorded, saved_file)
+                except Exception as e:
+                    logger.warning("Error in on_session_finished callback for %s: %s", job.room_id, e)
+
+            if saved_file:
+                if saved_file.suffix.lower() not in (".mp4", ".mkv"):
                     logger.warning(
                         "Room %s: saved RAW %s (mux failed) - it will still be uploaded",
-                        job.room_id, result_mp4.name,
+                        job.room_id, saved_file.name,
                     )
                 if self._on_file_ready:
                     try:
-                        self._on_file_ready(result_mp4, job.room_id, duration_sec)
+                        self._on_file_ready(saved_file, job.room_id, duration_sec)
                     except Exception as e:
                         logger.exception(
                             "Error in on_file_ready callback for %s: %s",

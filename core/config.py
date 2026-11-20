@@ -37,7 +37,7 @@ class Config:
     proxy: str = ""
     monitor_interval_sec: int = 60  # Default 60 seconds periodic check
     notify_on_status_change: bool = True
-    session_max_duration_sec: int = 900  # 15 mins rotation per session
+    session_max_duration_sec: int = 7200  # 2 hours per session (default increased from 900s)
     use_ffmpeg_recorder: bool = True
     max_recording_height: int = 1080  # Max recording quality ceiling (default 1080p)
 

@@ -96,6 +96,51 @@ class TestStatusChangeNotification(unittest.TestCase):
         self.tm.check_all_room_statuses()
         self.assertEqual(len(batch_events), 1)
 
+    @patch("core.task_manager.probe_room")
+    @patch("core.task_manager.record_stream_ffmpeg")
+    def test_session_lifecycle_callbacks(self, mock_record, mock_probe):
+        started_events = []
+        finished_events = []
+
+        def on_started(room_id, info, out_path):
+            started_events.append((room_id, info.resolution_label, out_path.name))
+
+        def on_finished(room_id, dur, b_rec, saved_path):
+            finished_events.append((room_id, dur, b_rec, saved_path.name if saved_path else None))
+
+        self.tm.use_ffmpeg_recorder = True
+        self.tm.set_on_session_started_callback(on_started)
+        self.tm.set_on_session_finished_callback(on_finished)
+        self.tm.start_tracking("cam_life")
+
+        mock_probe.return_value = StreamInfo(
+            room_id="cam_life",
+            is_live=True,
+            hls_url="https://edge.example.com/live.m3u8",
+            resolution_label="1080p",
+        )
+
+        fake_out = self.rec_dir / "chaturbate" / "cam_life" / "test.mp4"
+        fake_out.parent.mkdir(parents=True, exist_ok=True)
+        fake_out.write_bytes(b"data" * 100)
+        mock_record.return_value = fake_out
+
+        # Dispatch recording
+        self.tm.check_all_room_statuses(dispatch_recording=True)
+
+        # Worker thread executes in background
+        job = self.tm.get_job("cam_life")
+        if job and job.thread:
+            job.thread.join(timeout=2.0)
+
+        self.assertEqual(len(started_events), 1)
+        self.assertEqual(started_events[0][0], "cam_life")
+        self.assertEqual(started_events[0][1], "1080p")
+
+        self.assertEqual(len(finished_events), 1)
+        self.assertEqual(finished_events[0][0], "cam_life")
+        self.assertEqual(finished_events[0][3], "test.mp4")
+
 
 if __name__ == "__main__":
     unittest.main()

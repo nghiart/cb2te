@@ -362,7 +362,12 @@ class UploadQueue:
                     pass
 
         upload_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        caption = f"#chaturbate #{item.room_id}\n📅 {upload_time_str}"
+        dur_s = int(item.duration_sec or 0)
+        m, s = divmod(dur_s, 60)
+        h, m = divmod(m, 60)
+        dur_str = f"{h}h{m:02d}m{s:02d}s" if h > 0 else f"{m}m{s:02d}s"
+        sz_mb = item.file_path.stat().st_size / (1024 * 1024) if item.file_path.exists() else 0
+        caption = f"📹 #{item.room_id} | ⏱️ {dur_str} ({sz_mb:.1f} MB)\n📅 {upload_time_str}"
 
         suffix = item.file_path.suffix.lower()
         is_video = suffix in (".mp4", ".mkv", ".mov", ".webm")

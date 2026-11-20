@@ -289,7 +289,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         max_concurrent=cfg.max_concurrent,
         recordings_dir=recordings_dir,
         proxy=cfg.proxy,
-        max_duration_sec=getattr(cfg, "session_max_duration_sec", 900),
+        max_duration_sec=getattr(cfg, "session_max_duration_sec", 7200),
         use_ffmpeg_recorder=getattr(cfg, "use_ffmpeg_recorder", True),
         max_recording_height=getattr(cfg, "max_recording_height", 1080),
         min_free_mb=getattr(cfg, "min_free_mb", 400),
@@ -326,19 +326,75 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         favorites_path=fav_path,
     )
 
-    # Wire status change notification to Telegram admins
     loop = asyncio.get_running_loop()
+
+    async def _send_safe_message(target: int | str, text: str) -> None:
+        try:
+            await client.send_message(target, text)
+        except Exception as exc:
+            logger.warning("Failed to send Telegram message to %s: %s", target, exc)
+
+    def dispatch_tg_notification(text: str) -> None:
+        if not client:
+            return
+        targets = []
+        if cfg.chat_id:
+            targets.append(cfg.chat_id)
+        for a in cfg.admin_ids:
+            if a not in targets:
+                targets.append(a)
+
+        for target in targets:
+            try:
+                loop.create_task(_send_safe_message(target, text))
+            except Exception as e:
+                logger.warning("Failed to schedule telegram message to %s: %s", target, e)
+
+    def on_session_started(room_id: str, info: StreamInfo, out_path: Path):
+        res = f" [{info.resolution_label}]" if info.resolution_label else ""
+        now_str = datetime.now().strftime("%H:%M:%S")
+        msg = (
+            f"🔴 **BẮT ĐẦU GHI HÌNH: `#{room_id}`**{res}\n"
+            f"⏱️ Bắt đầu lúc: `{now_str}`\n"
+            f"📁 File: `{out_path.name}`"
+        )
+        dispatch_tg_notification(msg)
+
+    task_manager.set_on_session_started_callback(on_session_started)
+
+    def on_session_finished(room_id: str, duration_sec: float, bytes_recorded: int, result_path: Optional[Path]):
+        m, s = divmod(int(duration_sec), 60)
+        h, m = divmod(m, 60)
+        dur_str = f"{h}h{m:02d}m{s:02d}s" if h > 0 else f"{m}m{s:02d}s"
+        size_mb = bytes_recorded / (1024 * 1024)
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        if result_path and result_path.exists() and result_path.stat().st_size > 0:
+            msg = (
+                f"⏹️ **KẾT THÚC PHIÊN LIVE: `#{room_id}`**\n"
+                f"⏱️ Thời lượng: `{dur_str}` | Dung lượng: `{size_mb:.1f} MB`\n"
+                f"🕒 Kết thúc lúc: `{now_str}`\n"
+                f"📤 Video đang được đưa vào hàng đợi tải lên nhóm..."
+            )
+        else:
+            msg = (
+                f"⚠️ **KẾT THÚC PHIÊN LIVE: `#{room_id}` (Không có file)**\n"
+                f"⏱️ Thời lượng: `{dur_str}` | Dung lượng: `{size_mb:.1f} MB`\n"
+                f"🕒 Kết thúc lúc: `{now_str}`"
+            )
+        dispatch_tg_notification(msg)
+
+    task_manager.set_on_session_finished_callback(on_session_finished)
 
     def on_batch_status_change(
         all_statuses: dict[str, tuple[str, StreamInfo]],
         changes: list[tuple[str, str, str, StreamInfo]],
     ):
-        if not cfg.notify_on_status_change or not client or not cfg.admin_ids:
+        if not cfg.notify_on_status_change or not client:
             return
 
         now_str = datetime.now().strftime("%H:%M:%S")
 
-        # 1. Title ngay đầu thông báo: #abc vừa offline/online/private
         header_changes = []
         for room, _old_st, new_st, info in changes:
             st_lower = new_st.lower()
@@ -382,12 +438,7 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
             lines.append(f"• `#{room}`: {icon} {label}{rec_tag}")
 
         msg = "\n".join(lines)
-
-        for admin_id in cfg.admin_ids:
-            try:
-                loop.create_task(client.send_message(admin_id, msg))
-            except Exception as e:
-                logger.debug("Failed to dispatch batch status notification: %s", e)
+        dispatch_tg_notification(msg)
 
     task_manager.set_on_batch_status_change_callback(on_batch_status_change)
 
