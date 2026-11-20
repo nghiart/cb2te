@@ -1241,7 +1241,6 @@ def record_stream_ffmpeg(
 
     reconnect_args = [
         "-reconnect", "1",
-        "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
         "-reconnect_on_http_error", "4xx,5xx",
@@ -1455,7 +1454,6 @@ def record_stream_segmented(
 
     reconnect_args = [
         "-reconnect", "1",
-        "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
         "-reconnect_on_http_error", "4xx,5xx",

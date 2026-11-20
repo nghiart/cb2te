@@ -397,7 +397,7 @@ class TestProbeFallbacks(unittest.TestCase):
             self.assertIn("-map", call_cmd)
             self.assertIn("0:p:2:v:0", call_cmd)
             self.assertIn("0:p:2:a:0?", call_cmd)
-            self.assertIn("-reconnect_at_eof", call_cmd)
+            self.assertIn("-reconnect_streamed", call_cmd)
             self.assertIn("-reconnect_on_network_error", call_cmd)
 
 
