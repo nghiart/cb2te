@@ -399,6 +399,8 @@ class TestProbeFallbacks(unittest.TestCase):
             self.assertIn("0:p:2:a:0?", call_cmd)
             self.assertIn("-reconnect_streamed", call_cmd)
             self.assertIn("-reconnect_on_network_error", call_cmd)
+            self.assertIn("-seg_max_retry", call_cmd)
+            self.assertIn("-rw_timeout", call_cmd)
 
 
 class TestDoctorOffline(unittest.TestCase):

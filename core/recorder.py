@@ -20,6 +20,7 @@ The engine also:
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import logging
@@ -1239,7 +1240,12 @@ def record_stream_ffmpeg(
         except Exception as exc:
             logger.debug("record_stream_ffmpeg: variant probe error for %s: %s", clean_room, exc)
 
-    reconnect_args = [
+    resilience_args = [
+        "-rw_timeout", "15000000",
+        "-seg_max_retry", "10",
+        "-max_reload", "1000",
+        "-m3u8_hold_counters", "1000",
+        "-http_persistent", "1",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
@@ -1252,7 +1258,7 @@ def record_stream_ffmpeg(
         "-y",
         "-headers", headers_str,
     ]
-    cmd.extend(reconnect_args)
+    cmd.extend(resilience_args)
 
     if proxy:
         cmd.extend(["-http_proxy", proxy])
@@ -1262,7 +1268,7 @@ def record_stream_ffmpeg(
             "-i", video_url,
             "-headers", headers_str,
         ])
-        cmd.extend(reconnect_args)
+        cmd.extend(resilience_args)
         if proxy:
             cmd.extend(["-http_proxy", proxy])
         cmd.extend([
@@ -1295,13 +1301,22 @@ def record_stream_ffmpeg(
     logger.info("record_stream_ffmpeg: starting recording for %s -> %s", clean_room, temp_target.name)
     start_mono = time.monotonic()
 
+    log_dir = out_path.parent / ".logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_log = log_dir / f"ffmpeg_{clean_room}.log"
+    err_f = None
     proc: Optional[subprocess.Popen] = None
     try:
+        try:
+            err_f = open(ffmpeg_log, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            err_f = None
+
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=err_f if err_f is not None else subprocess.DEVNULL,
             text=True,
         )
 
@@ -1361,11 +1376,39 @@ def record_stream_ffmpeg(
             except Exception:
                 pass
 
+        # Inspect exit status and log stderr tail if failed or ended early
+        retcode = proc.poll()
+        elapsed = time.monotonic() - start_mono
+        tail_text = ""
+        if ffmpeg_log.exists():
+            try:
+                with open(ffmpeg_log, "r", encoding="utf-8", errors="replace") as f:
+                    lines = collections.deque(f, maxlen=15)
+                    tail_text = "".join(lines).strip()
+            except Exception:
+                pass
+
+        if retcode not in (0, None):
+            logger.warning(
+                "record_stream_ffmpeg: ffmpeg for %s exited with non-zero code %s. Stderr tail:\n%s",
+                clean_room, retcode, tail_text,
+            )
+        elif elapsed < 180 and tail_text:
+            logger.info(
+                "record_stream_ffmpeg: %s stream ended early (%.1fs). Stderr tail:\n%s",
+                clean_room, elapsed, tail_text,
+            )
+
     except Exception as exc:
         logger.error("record_stream_ffmpeg error for %s: %s", clean_room, exc)
         if proc and proc.poll() is None:
             proc.kill()
     finally:
+        if err_f is not None:
+            try:
+                err_f.close()
+            except OSError:
+                pass
         release_os_memory()
 
     if temp_target.exists():
@@ -1452,7 +1495,12 @@ def record_stream_segmented(
         except Exception as exc:
             logger.debug("record_stream_segmented: variant probe error for %s: %s", clean_room, exc)
 
-    reconnect_args = [
+    resilience_args = [
+        "-rw_timeout", "15000000",
+        "-seg_max_retry", "10",
+        "-max_reload", "1000",
+        "-m3u8_hold_counters", "1000",
+        "-http_persistent", "1",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
@@ -1467,7 +1515,7 @@ def record_stream_segmented(
         "-loglevel", "warning",
         "-headers", headers_str,
     ]
-    cmd.extend(reconnect_args)
+    cmd.extend(resilience_args)
 
     if proxy:
         cmd.extend(["-http_proxy", proxy])
@@ -1477,7 +1525,7 @@ def record_stream_segmented(
             "-i", video_url,
             "-headers", headers_str,
         ])
-        cmd.extend(reconnect_args)
+        cmd.extend(resilience_args)
         if proxy:
             cmd.extend(["-http_proxy", proxy])
         cmd.extend([
