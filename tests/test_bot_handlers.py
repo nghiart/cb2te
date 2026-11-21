@@ -102,6 +102,31 @@ class TestBotCommandDispatching(unittest.IsolatedAsyncioTestCase):
         # Unauthorized: should not return status info
         mock_event.reply.assert_not_called()
 
+    async def test_commands_in_groups_are_ignored(self):
+        mock_client = MagicMock()
+        handlers = register_handlers(
+            mock_client,
+            self.cfg,
+            self.tm,
+            self.uq,
+            self.store,
+            favorites_path=self.fav_file,
+        )
+
+        # Admin sends command, but inside a group/channel (is_private=False)
+        mock_event = MagicMock()
+        mock_event.sender_id = 111  # Is an admin
+        mock_event.is_private = False  # Sent in group!
+        mock_event.raw_text = "/status"
+        mock_event.reply = AsyncMock()
+
+        handler = handlers.get("/status")
+        self.assertIsNotNone(handler)
+        await handler(mock_event)
+
+        # Group command must be strictly ignored: NO reply to group!
+        mock_event.reply.assert_not_called()
+
     async def test_start_and_help_commands(self):
         mock_client = MagicMock()
         handlers = register_handlers(

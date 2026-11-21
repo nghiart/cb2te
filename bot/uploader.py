@@ -105,6 +105,7 @@ class UploadQueue:
         edit_throttle_sec: float = 5.0,
         upload_store: Optional[UploadStore] = None,
         delete_after_upload: bool = False,
+        send_progress_message: bool = False,
     ) -> None:
         self._queue: asyncio.Queue[UploadItem] = asyncio.Queue()
         self._items: list[UploadItem] = []
@@ -114,6 +115,7 @@ class UploadQueue:
         self._edit_throttle_sec = edit_throttle_sec
         self.upload_store = upload_store
         self.delete_after_upload = delete_after_upload
+        self.send_progress_message = send_progress_message
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Backpressure & throughput tracking (10-minute window)
@@ -329,11 +331,14 @@ class UploadQueue:
         last_percent = -1
         progress_msg: Any = None
 
-        try:
-            init_text = f"⏳ Đang tải lên: {item.file_path.name} ({size_mb:.1f} MB) [0%]"
-            progress_msg = await client.send_message(chat_id, init_text)
-        except Exception as e:
-            logger.warning("Failed to send initial progress message: %s", e)
+        # Groups should strictly receive uploaded files without progress spam.
+        # Only send progress messages if explicitly enabled.
+        if self.send_progress_message:
+            try:
+                init_text = f"⏳ Đang tải lên: {item.file_path.name} ({size_mb:.1f} MB) [0%]"
+                progress_msg = await client.send_message(chat_id, init_text)
+            except Exception as e:
+                logger.warning("Failed to send initial progress message: %s", e)
 
         def progress_callback(current: int, total: int):
             nonlocal last_edit, last_percent
@@ -344,22 +349,23 @@ class UploadQueue:
             if self._current_upload:
                 self._current_upload["progress_percent"] = pct
 
-            if (now - last_edit >= self._edit_throttle_sec and pct != last_percent) or pct >= 100:
-                last_edit = now
-                last_percent = pct
-                cur_mb = current / (1024 * 1024)
-                tot_mb = total / (1024 * 1024)
-                edit_text = (
-                    f"⏳ Đang tải lên: {item.file_path.name} "
-                    f"({cur_mb:.1f}/{tot_mb:.1f} MB) [{pct}%]"
-                )
-                try:
-                    if progress_msg and hasattr(progress_msg, "edit"):
-                        res = progress_msg.edit(edit_text)
-                        if asyncio.iscoroutine(res):
-                            asyncio.get_running_loop().create_task(res)
-                except Exception:
-                    pass
+            if self.send_progress_message and progress_msg:
+                if (now - last_edit >= self._edit_throttle_sec and pct != last_percent) or pct >= 100:
+                    last_edit = now
+                    last_percent = pct
+                    cur_mb = current / (1024 * 1024)
+                    tot_mb = total / (1024 * 1024)
+                    edit_text = (
+                        f"⏳ Đang tải lên: {item.file_path.name} "
+                        f"({cur_mb:.1f}/{tot_mb:.1f} MB) [{pct}%]"
+                    )
+                    try:
+                        if hasattr(progress_msg, "edit"):
+                            res = progress_msg.edit(edit_text)
+                            if asyncio.iscoroutine(res):
+                                asyncio.get_running_loop().create_task(res)
+                    except Exception:
+                        pass
 
         upload_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         dur_s = int(item.duration_sec or 0)

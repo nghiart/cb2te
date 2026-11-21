@@ -338,12 +338,12 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
     def dispatch_tg_notification(text: str) -> None:
         if not client:
             return
-        targets = []
-        if cfg.chat_id:
-            targets.append(cfg.chat_id)
-        for a in cfg.admin_ids:
-            if a not in targets:
-                targets.append(a)
+        # Status notifications and bot controls are strictly routed to admin IDs via private chat.
+        # The Telegram group (cfg.chat_id) only receives uploaded media files, NEVER text status notifications.
+        targets = [a for a in cfg.admin_ids if a]
+        if not targets:
+            logger.debug("No admin_ids configured to receive status notifications")
+            return
 
         for target in targets:
             try:

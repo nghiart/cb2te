@@ -66,21 +66,46 @@ class TestUploader(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(uq.join(), timeout=3.0)
         await uq.stop_worker()
 
-        # Check send_message called for initial status
-        mock_client.send_message.assert_called_once()
+        # Check send_message was NOT called (group receives no progress message by default)
+        mock_client.send_message.assert_not_called()
         # Check send_file called
         mock_client.send_file.assert_called_once()
         call_kwargs = mock_client.send_file.call_args.kwargs
         self.assertIn("#model", call_kwargs.get("caption", ""))
-
-        # Check delete progress message was called
-        self.assertTrue(progress_msg.delete.called or mock_client.delete_messages.called)
 
         # Check HistoryStore recorded the upload
         records = self.store.list_records(active_only=True)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].room_id, "model")
         self.assertEqual(records[0].status, "uploaded")
+
+    async def test_worker_with_progress_message_enabled(self):
+        uq = UploadQueue(send_progress_message=True)
+        video_file = self.base_dir / "chaturbate_prog_20261109_120000.mp4"
+        video_file.write_bytes(b"B" * 1024 * 1024)
+
+        item = UploadItem(
+            file_path=video_file,
+            room_id="prog_model",
+            duration_sec=100,
+        )
+
+        mock_client = MagicMock()
+        progress_msg = MagicMock()
+        progress_msg.id = 456
+        progress_msg.edit = AsyncMock()
+        progress_msg.delete = AsyncMock()
+        mock_client.send_message = AsyncMock(return_value=progress_msg)
+        mock_client.send_file = AsyncMock()
+
+        uq.enqueue(item)
+        await uq.start_worker(client=mock_client, chat_id=-10012345, store=self.store)
+        await asyncio.wait_for(uq.join(), timeout=3.0)
+        await uq.stop_worker()
+
+        mock_client.send_message.assert_called_once()
+        mock_client.send_file.assert_called_once()
+        self.assertTrue(progress_msg.delete.called or mock_client.delete_messages.called)
 
     async def test_worker_handles_upload_error(self):
         uq = UploadQueue()

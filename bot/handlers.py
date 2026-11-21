@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "is_authorized",
+    "is_authorized_private",
     "format_status_message",
     "format_room_status_message",
     "format_help_message",
@@ -38,6 +39,17 @@ def is_authorized(user_id: Optional[int], admin_ids: list[int]) -> bool:
     if user_id is None or not admin_ids:
         return False
     return int(user_id) in admin_ids
+
+
+def is_authorized_private(event: Any, admin_ids: list[int]) -> bool:
+    """Check if the event is a private 1-on-1 chat with the bot from an authorized admin.
+
+    All bot controls and responses are restricted to private chat with the bot.
+    Commands sent in groups or channels are strictly rejected.
+    """
+    if hasattr(event, "is_private") and not bool(getattr(event, "is_private", True)):
+        return False
+    return is_authorized(getattr(event, "sender_id", None), admin_ids)
 
 
 def format_status_message(
@@ -200,17 +212,17 @@ def register_handlers(
     fav_file = Path(favorites_path) if favorites_path else Path("favorites.json")
 
     async def handle_start(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
         await event.reply(format_help_message())
 
     async def handle_help(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
         await event.reply(format_help_message())
 
     async def handle_status(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -260,7 +272,7 @@ def register_handlers(
         await event.reply(text)
 
     async def handle_rec(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -280,7 +292,7 @@ def register_handlers(
             await event.reply(f"ℹ️ Phòng `{room}` đã nằm trong danh sách theo dõi.")
 
     async def handle_stop(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -302,7 +314,7 @@ def register_handlers(
             await event.reply(f"⚠️ Phòng `{room}` không có trong danh sách đang theo dõi.")
 
     async def handle_upload(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -337,7 +349,7 @@ def register_handlers(
         await event.reply(f"📤 Đã đưa vào hàng đợi upload {len(matched)} file:\n• " + "\n• ".join(enqueued_names))
 
     async def handle_fav(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         favs = load_favorites(fav_file)
@@ -353,7 +365,7 @@ def register_handlers(
         await event.reply("\n".join(lines))
 
     async def handle_add(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -374,7 +386,7 @@ def register_handlers(
             await event.reply(f"ℹ️ `{room}` đã có sẵn trong `{fav_file.name}`.")
 
     async def handle_del(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -395,7 +407,7 @@ def register_handlers(
             await event.reply(f"⚠️ `{room}` không có trong `{fav_file.name}`.")
 
     async def handle_files(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         records = history_store.sync_with_disk(task_manager.recordings_dir)
@@ -403,7 +415,7 @@ def register_handlers(
         await event.reply(text)
 
     async def handle_clean(event: Any) -> None:
-        if not is_authorized(event.sender_id, config.admin_ids):
+        if not is_authorized_private(event, config.admin_ids):
             return
 
         parts = (event.raw_text or "").strip().split(maxsplit=1)
@@ -529,6 +541,12 @@ def register_handlers(
 
         @client.on(events.NewMessage)
         async def on_message(event: Any):
+            # Control commands are strictly private via 1-on-1 bot chat.
+            # Any messages sent in groups/channels are ignored to keep groups clean.
+            if not getattr(event, "is_private", False):
+                return
+            if not is_authorized(getattr(event, "sender_id", None), config.admin_ids):
+                return
             text = (event.raw_text or "").strip()
             cmd = text.split()[0].lower() if text else ""
             if "@" in cmd:

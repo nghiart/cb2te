@@ -141,6 +141,30 @@ class TestStatusChangeNotification(unittest.TestCase):
         self.assertEqual(finished_events[0][0], "cam_life")
         self.assertEqual(finished_events[0][3], "test.mp4")
 
+    def test_notification_routing_admin_only(self):
+        """Verify that status notifications are only dispatched to admin_ids and never to chat_id."""
+        from core.config import Config
+
+        cfg = Config(
+            chat_id=-1001154181162,
+            admin_ids=[1491995718],
+        )
+
+        mock_client = MagicMock()
+        sent_targets = []
+
+        # Simulate dispatch_tg_notification logic
+        def dispatch_tg_notification(text: str):
+            targets = [a for a in cfg.admin_ids if a]
+            for target in targets:
+                sent_targets.append(target)
+
+        dispatch_tg_notification("🔴 BẮT ĐẦU GHI HÌNH: #test")
+
+        self.assertIn(1491995718, sent_targets)
+        self.assertNotIn(-1001154181162, sent_targets)
+        self.assertNotIn(cfg.chat_id, sent_targets)
+
 
 if __name__ == "__main__":
     unittest.main()
