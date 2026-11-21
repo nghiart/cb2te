@@ -21,3 +21,15 @@ __pycache__/
 recordings/
 history.json
 SSH_WiFi_Pixel6Pro.command
+
+# Cấu hình người dùng & dữ liệu runtime (không commit, không bị xóa khi git pull / git clean)
+settings.json
+settings.txt
+favorites.json
+favorites.txt
+daemon.log
+*.log
+*.db
+*.db-*
+upload_queue.db*
+

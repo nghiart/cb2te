@@ -400,9 +400,11 @@ def register_handlers(
             return
 
         ok = remove_favorite(room_id=room, path=fav_file)
-        task_manager.stop_tracking(room)
+        was_tracked = task_manager.stop_tracking(room)
         if ok:
             await event.reply(f"🗑 Đã xóa `{room}` khỏi `{fav_file.name}`.")
+        elif was_tracked:
+            await event.reply(f"🗑 Đã dừng theo dõi `{room}` (phòng không có trong `{fav_file.name}`).")
         else:
             await event.reply(f"⚠️ `{room}` không có trong `{fav_file.name}`.")
 

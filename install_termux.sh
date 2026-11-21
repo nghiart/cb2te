@@ -83,38 +83,38 @@ fi
 ok "Đã cài telethon + pysocks + python-socks"
 
 step "5/5 Tạo file cấu hình"
-if [ ! -f settings.txt ]; then
-    cp settings.example.txt settings.txt
-    ok "Đã tạo settings.txt (cần điền thông tin Telegram)"
+if [ ! -f settings.json ] && [ ! -f settings.txt ]; then
+    cp settings.example.json settings.json
+    ok "Đã tạo settings.json (cần điền thông tin Telegram)"
 else
-    ok "settings.txt đã tồn tại — giữ nguyên"
+    ok "Cấu hình settings đã tồn tại — giữ nguyên"
 fi
-if [ ! -f favorites.txt ]; then
-    cp favorites.example.txt favorites.txt
-    ok "Đã tạo favorites.txt"
+if [ ! -f favorites.json ] && [ ! -f favorites.txt ]; then
+    cp favorites.example.json favorites.json
+    ok "Đã tạo favorites.json"
 else
-    ok "favorites.txt đã tồn tại — giữ nguyên"
+    ok "Danh sách favorites đã tồn tại — giữ nguyên"
 fi
 
 step "Kiểm tra hệ thống"
-python3 rec2_app.py doctor --probe 0 || true
+python3 1st.py doctor --probe 0 || true
 
 printf "\n${GREEN}==============================================${NC}\n"
 printf "${GREEN} Cài đặt xong! Các bước tiếp theo:${NC}\n"
 printf "${GREEN}==============================================${NC}\n"
 cat <<'NEXT'
  1. Mở file cấu hình và điền thông tin Telegram:
-       nano settings.txt
+       nano settings.json
     (API_ID, API_HASH, BOT_TOKEN, CHAT_ID, ADMIN_IDS)
 
  2. Thêm streamer muốn theo dõi:
-       nano favorites.txt
+       nano favorites.json
 
  3. Kiểm tra lại (nên thấy toàn PASS):
-       python3 rec2_app.py doctor
+       python3 1st.py doctor
 
  4. Chạy 24/7:
-       python3 rec2_app.py bot
+       python3 1st.py bot
 
  5. Tắt an toàn: nhấn Ctrl + C (đợi nó đóng gói xong file đang ghi)
 

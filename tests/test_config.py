@@ -128,6 +128,29 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(remove_favorite("streamer_new", new_fav_file))
         self.assertEqual(len(load_favorites(new_fav_file)), 0)
 
+    def test_dual_format_sync(self):
+        json_file = self.tmp_dir / "sync_favs.json"
+        txt_file = self.tmp_dir / "sync_favs.txt"
+
+        # Initially save to JSON
+        add_favorite("model_sync1", "note1", json_file)
+        # Create corresponding txt file with both models
+        add_favorite("model_sync2", "note2", txt_file)
+
+        # Ensure both files exist
+        self.assertTrue(json_file.exists())
+        self.assertTrue(txt_file.exists())
+
+        # Adding to json_file should sync to txt_file
+        add_favorite("model_sync3", "note3", json_file)
+        txt_favs = load_favorites(txt_file)
+        self.assertTrue(any(f["room_id"] == "model_sync3" for f in txt_favs))
+
+        # Removing from json_file should remove from txt_file as well
+        self.assertTrue(remove_favorite("model_sync3", json_file))
+        txt_favs_after = load_favorites(txt_file)
+        self.assertFalse(any(f["room_id"] == "model_sync3" for f in txt_favs_after))
+
 
 if __name__ == "__main__":
     unittest.main()

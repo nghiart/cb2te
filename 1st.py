@@ -527,6 +527,25 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
         logger.info("Daemon stopped gracefully.")
 
 
+def resolve_config_path(arg_path: str | Path, default_name: str) -> Path:
+    """Resolve configuration or data file paths canonically.
+
+    If relative, prefers cwd if existing, otherwise script directory to prevent
+    fragmented configs when daemon is invoked from arbitrary working directories.
+    """
+    p = Path(arg_path) if arg_path else Path(default_name)
+    if p.is_absolute():
+        return p
+    cwd_path = Path.cwd() / p
+    if cwd_path.exists():
+        return cwd_path.resolve()
+    script_dir = Path(__file__).resolve().parent
+    script_path = script_dir / p
+    if script_path.exists():
+        return script_path.resolve()
+    return script_path.resolve()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """Main entrypoint routing."""
     parser = build_parser()
@@ -538,16 +557,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    settings_path = Path(args.settings)
+    settings_path = resolve_config_path(args.settings, "settings.json")
     cfg = load_config(settings_path)
 
     recordings_dir = (
-        Path(args.recordings_dir)
+        Path(args.recordings_dir).resolve()
         if args.recordings_dir
         else get_recordings_dir()
     )
-    fav_path = Path(args.favorites)
-    db_path = Path(args.db)
+    fav_path = resolve_config_path(args.favorites, "favorites.json")
+    db_path = resolve_config_path(args.db, "history.json")
 
     if args.cmd == "status":
         return run_status_cmd(cfg, recordings_dir, fav_path, db_path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -334,6 +335,7 @@ def load_favorites(path: Path, include_disabled: bool = False) -> list[dict]:
 def save_favorites(items: list[dict], path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
 
     if path.suffix == ".json":
         clean_items = []
@@ -349,7 +351,8 @@ def save_favorites(items: list[dict], path: Path) -> None:
                 "note": str(it.get("note") or it.get("nick") or "").strip(),
                 "enabled": bool(it.get("enabled", True)),
             })
-        path.write_text(json.dumps({"favorites": clean_items}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp_file.write_text(json.dumps({"favorites": clean_items}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp_file.replace(path)
         return
 
     # Text format
@@ -371,7 +374,8 @@ def save_favorites(items: list[dict], path: Path) -> None:
         suffix = f"  {note}" if note else ""
         lines.append(f"{prefix}{rid}{suffix}")
     lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    temp_file.write_text("\n".join(lines), encoding="utf-8")
+    temp_file.replace(path)
 
 
 def add_favorite(room_id: str, note: str, path: Path) -> bool:
@@ -380,21 +384,30 @@ def add_favorite(room_id: str, note: str, path: Path) -> bool:
         return False
     path = Path(path)
     items = load_favorites(path, include_disabled=True) if (path.exists() or path.with_suffix(".txt").exists() or path.with_suffix(".json").exists()) else []
+    found = False
     for it in items:
         if it["room_id"] == rid:
             it["note"] = note.strip()
             it["nick"] = note.strip()
             it["enabled"] = True
-            save_favorites(items, path)
-            return True
-    items.append({
-        "platform": "chaturbate",
-        "room_id": rid,
-        "note": note.strip(),
-        "nick": note.strip(),
-        "enabled": True,
-    })
+            found = True
+            break
+    if not found:
+        items.append({
+            "platform": "chaturbate",
+            "room_id": rid,
+            "note": note.strip(),
+            "nick": note.strip(),
+            "enabled": True,
+        })
     save_favorites(items, path)
+
+    # Synchronize counterpart format (.txt if path is .json, or .json if path is .txt)
+    alt_ext = ".txt" if path.suffix == ".json" else ".json"
+    alt_path = path.with_suffix(alt_ext)
+    if alt_path.exists() and alt_path != path:
+        save_favorites(items, alt_path)
+
     return True
 
 
@@ -406,7 +419,20 @@ def remove_favorite(room_id: str, path: Path) -> bool:
     items = load_favorites(path, include_disabled=True)
     orig_len = len(items)
     items = [it for it in items if it["room_id"] != rid]
-    if len(items) == orig_len:
-        return False
-    save_favorites(items, path)
-    return True
+    removed = len(items) < orig_len
+
+    if removed:
+        save_favorites(items, path)
+
+    # Also remove from counterpart format (.txt if path is .json, or .json if path is .txt)
+    alt_ext = ".txt" if path.suffix == ".json" else ".json"
+    alt_path = path.with_suffix(alt_ext)
+    if alt_path.exists() and alt_path != path:
+        alt_items = load_favorites(alt_path, include_disabled=True)
+        orig_alt_len = len(alt_items)
+        alt_items = [it for it in alt_items if it["room_id"] != rid]
+        if len(alt_items) < orig_alt_len:
+            save_favorites(alt_items, alt_path)
+            removed = True
+
+    return removed
