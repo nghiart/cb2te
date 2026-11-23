@@ -330,6 +330,17 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
 
     async def _send_safe_message(target: int | str, text: str) -> None:
         try:
+            # Enforce that text notifications are ONLY sent to positive user IDs (private admin chat).
+            # Never send text messages to groups/channels (negative IDs or cfg.chat_id).
+            try:
+                t_int = int(target)
+                if t_int <= 0 or (cfg.chat_id and t_int == int(cfg.chat_id)):
+                    logger.warning("Blocked attempt to send text notification to non-admin target %s", target)
+                    return
+            except (ValueError, TypeError):
+                logger.warning("Blocked attempt to send text notification to invalid target %s", target)
+                return
+
             await client.send_message(target, text)
             logger.info("Sent Telegram notification to %s", target)
         except Exception as exc:
@@ -340,9 +351,19 @@ async def _run_bot_daemon(cfg: Config, recordings_dir: Path, fav_path: Path, db_
             return
         # Status notifications and bot controls are strictly routed to admin IDs via private chat.
         # The Telegram group (cfg.chat_id) only receives uploaded media files, NEVER text status notifications.
-        targets = [a for a in cfg.admin_ids if a]
+        targets = []
+        for a in cfg.admin_ids:
+            if not a:
+                continue
+            try:
+                tid = int(a)
+                if tid > 0 and (not cfg.chat_id or tid != int(cfg.chat_id)):
+                    targets.append(tid)
+            except (ValueError, TypeError):
+                continue
+
         if not targets:
-            logger.debug("No admin_ids configured to receive status notifications")
+            logger.debug("No valid admin_ids configured to receive private status notifications")
             return
 
         for target in targets:

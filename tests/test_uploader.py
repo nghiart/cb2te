@@ -99,13 +99,38 @@ class TestUploader(unittest.IsolatedAsyncioTestCase):
         mock_client.send_file = AsyncMock()
 
         uq.enqueue(item)
-        await uq.start_worker(client=mock_client, chat_id=-10012345, store=self.store)
+        # Positive chat_id (e.g. DM with admin) allows progress message
+        await uq.start_worker(client=mock_client, chat_id=1491995718, store=self.store)
         await asyncio.wait_for(uq.join(), timeout=3.0)
         await uq.stop_worker()
 
         mock_client.send_message.assert_called_once()
         mock_client.send_file.assert_called_once()
         self.assertTrue(progress_msg.delete.called or mock_client.delete_messages.called)
+
+    async def test_worker_progress_suppressed_for_group(self):
+        uq = UploadQueue(send_progress_message=True)
+        video_file = self.base_dir / "chaturbate_group_20261109_120000.mp4"
+        video_file.write_bytes(b"B" * 1024 * 1024)
+
+        item = UploadItem(
+            file_path=video_file,
+            room_id="group_model",
+            duration_sec=100,
+        )
+
+        mock_client = MagicMock()
+        mock_client.send_message = AsyncMock()
+        mock_client.send_file = AsyncMock()
+
+        uq.enqueue(item)
+        # Negative chat_id (group channel) strictly suppresses progress message
+        await uq.start_worker(client=mock_client, chat_id=-1001154181162, store=self.store)
+        await asyncio.wait_for(uq.join(), timeout=3.0)
+        await uq.stop_worker()
+
+        mock_client.send_message.assert_not_called()
+        mock_client.send_file.assert_called_once()
 
     async def test_worker_handles_upload_error(self):
         uq = UploadQueue()

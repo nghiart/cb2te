@@ -49,6 +49,13 @@ def is_authorized_private(event: Any, admin_ids: list[int]) -> bool:
     """
     if hasattr(event, "is_private") and not bool(getattr(event, "is_private", True)):
         return False
+    chat_id = getattr(event, "chat_id", None)
+    if chat_id is not None:
+        try:
+            if int(chat_id) <= 0:
+                return False
+        except (ValueError, TypeError):
+            return False
     return is_authorized(getattr(event, "sender_id", None), admin_ids)
 
 
@@ -547,6 +554,13 @@ def register_handlers(
             # Any messages sent in groups/channels are ignored to keep groups clean.
             if not getattr(event, "is_private", False):
                 return
+            chat_id = getattr(event, "chat_id", None)
+            if chat_id is not None:
+                try:
+                    if int(chat_id) <= 0:
+                        return
+                except (ValueError, TypeError):
+                    return
             if not is_authorized(getattr(event, "sender_id", None), config.admin_ids):
                 return
             text = (event.raw_text or "").strip()

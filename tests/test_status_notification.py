@@ -142,28 +142,58 @@ class TestStatusChangeNotification(unittest.TestCase):
         self.assertEqual(finished_events[0][3], "test.mp4")
 
     def test_notification_routing_admin_only(self):
-        """Verify that status notifications are only dispatched to admin_ids and never to chat_id."""
+        """Verify that status notifications are only dispatched to positive admin_ids and never to chat_id or groups."""
         from core.config import Config
 
         cfg = Config(
             chat_id=-1001154181162,
-            admin_ids=[1491995718],
+            admin_ids=[1491995718, -1001154181162, -999, 0, None, "1491995718"],
         )
 
-        mock_client = MagicMock()
         sent_targets = []
 
         # Simulate dispatch_tg_notification logic
-        def dispatch_tg_notification(text: str):
-            targets = [a for a in cfg.admin_ids if a]
-            for target in targets:
-                sent_targets.append(target)
+        targets = []
+        for a in cfg.admin_ids:
+            if not a:
+                continue
+            try:
+                tid = int(a)
+                if tid > 0 and (not cfg.chat_id or tid != int(cfg.chat_id)):
+                    targets.append(tid)
+            except (ValueError, TypeError):
+                continue
 
-        dispatch_tg_notification("🔴 BẮT ĐẦU GHI HÌNH: #test")
+        for target in set(targets):
+            sent_targets.append(target)
 
-        self.assertIn(1491995718, sent_targets)
+        self.assertEqual(sent_targets, [1491995718])
         self.assertNotIn(-1001154181162, sent_targets)
         self.assertNotIn(cfg.chat_id, sent_targets)
+
+    def test_is_authorized_private_group_isolation(self):
+        from bot.handlers import is_authorized_private
+
+        # Valid private message from admin
+        event_ok = MagicMock()
+        event_ok.is_private = True
+        event_ok.chat_id = 1491995718
+        event_ok.sender_id = 1491995718
+        self.assertTrue(is_authorized_private(event_ok, [1491995718]))
+
+        # Message from group (negative chat_id)
+        event_group = MagicMock()
+        event_group.is_private = False
+        event_group.chat_id = -1001154181162
+        event_group.sender_id = 1491995718
+        self.assertFalse(is_authorized_private(event_group, [1491995718]))
+
+        # Message where is_private is True but chat_id is negative group
+        event_group2 = MagicMock()
+        event_group2.is_private = True
+        event_group2.chat_id = -1001154181162
+        event_group2.sender_id = 1491995718
+        self.assertFalse(is_authorized_private(event_group2, [1491995718]))
 
 
 if __name__ == "__main__":

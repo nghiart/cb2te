@@ -332,8 +332,15 @@ class UploadQueue:
         progress_msg: Any = None
 
         # Groups should strictly receive uploaded files without progress spam.
-        # Only send progress messages if explicitly enabled.
-        if self.send_progress_message:
+        # Only send progress messages if explicitly enabled AND destination is not a negative group ID.
+        is_group = False
+        try:
+            if int(chat_id) <= 0:
+                is_group = True
+        except (ValueError, TypeError):
+            pass
+
+        if self.send_progress_message and not is_group:
             try:
                 init_text = f"⏳ Đang tải lên: {item.file_path.name} ({size_mb:.1f} MB) [0%]"
                 progress_msg = await client.send_message(chat_id, init_text)
